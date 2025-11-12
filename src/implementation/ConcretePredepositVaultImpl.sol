@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: AGPL-3.0
 pragma solidity ^0.8.24;
 
 import {ConcreteStandardVaultImpl} from "./ConcreteStandardVaultImpl.sol";
@@ -19,8 +19,11 @@ import {
  * @title ConcretePredepositVaultImpl
  * @notice A vault implementation that extends ConcreteStandardVaultImpl with cross-chain share claiming via a standalone OApp.
  * @dev This is useful for pre-deposit phases where users can claim their shares on a different chain.
- *      Use setWithdrawLimits(0, 0) to disable withdrawals during the predeposit phase.
- *      Claims can only occur when cachedTotalAssets() == 0 (all assets allocated away).
+ *      Withdrawals should be disabled during the predeposit phase.
+ *      Claims can only occur when deposits and withdrawals are locked.
+ *      Claims should only occur when underlying assets are bridged to target chain.
+ *      Typically self claims should be enabled only when assets are already bridged to target chain.
+ *      In claims phase shares are duplicated until claimed on target chain and burned on source chain.
  *      The vault uses a separate OApp contract for cross-chain messaging.
  *
  * @custom:warning IMPORTANT: Assets deposited into this vault are intended to be bridged to a remote chain.
