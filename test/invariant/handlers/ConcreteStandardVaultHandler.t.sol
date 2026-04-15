@@ -254,7 +254,7 @@ contract ConcreteStandardVaultHandler is Test {
         if (ghost_strategiesCount == MAX_STRATEGIES) return;
 
         // Create new strategy
-        ERC4626StrategyMock newStrategy = new ERC4626StrategyMock(address(asset));
+        ERC4626StrategyMock newStrategy = new ERC4626StrategyMock(address(asset), address(vault));
 
         uint256 strategiesCountBefore = vault.getStrategies().length;
 

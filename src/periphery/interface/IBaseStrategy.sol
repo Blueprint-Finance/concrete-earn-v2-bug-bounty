@@ -75,4 +75,10 @@ interface IBaseStrategy is IStrategyTemplate {
      * @dev The vault address must be a valid non-zero address
      */
     error ZeroVaultAddress();
+
+    /**
+     * @notice Thrown when the calldata length is invalid (too short)
+     * @dev The calldata must contain at least the required amount of data
+     */
+    error InvalidDataLength();
 }

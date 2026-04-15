@@ -20,6 +20,7 @@ import {ConcreteV2RolesLib as RolesLib} from "../../../src/lib/Roles.sol";
 import {IConcreteStandardVaultImpl} from "../../../src/interface/IConcreteStandardVaultImpl.sol";
 
 import {console2 as console} from "forge-std/Test.sol";
+import {PausableUpgradeable} from "@openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
 
 contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallocationOrder {
     address public user1;
@@ -230,7 +231,7 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
     }
 
     function testProcessEpochFundsAllocated() public {
-        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset));
+        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset), address(concreteAsyncVault));
 
         addStrategyWithDeallocationOrder(address(strategy), address(concreteAsyncVault), allocator, strategyOperator);
 
@@ -289,7 +290,7 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
 
     //This test case was fixed by adding a require check in the allocate function to ensure that the vault has enough balance to process the epoch.
     function testProcessEpochInsufficientBalance() public {
-        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset));
+        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset), address(concreteAsyncVault));
 
         addStrategyWithDeallocationOrder(address(strategy), address(concreteAsyncVault), allocator, strategyOperator);
 
@@ -459,7 +460,7 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
 
     function testClaimWithdrawalDisableQueue() public {
         uint256 currentEpoch = concreteAsyncVault.latestEpochID();
-        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset));
+        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset), address(concreteAsyncVault));
 
         addStrategyWithDeallocationOrder(address(strategy), address(concreteAsyncVault), allocator, strategyOperator);
         uint256 withdrawAmount = 1000000e18;
@@ -551,7 +552,7 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
 
     function testEpochProcessingWithYield() public {
         // 1. Add a strategy
-        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset));
+        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset), address(concreteAsyncVault));
 
         addStrategyWithDeallocationOrder(address(strategy), address(concreteAsyncVault), allocator, strategyOperator);
 
@@ -811,5 +812,125 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
 
         // Verify assets were transferred directly
         assertEq(asset.balanceOf(thirdParty), initialThirdPartyAssetBalance + withdrawAmount);
+    }
+
+    function testPausePreventsCancelRequest() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 currentEpoch = concreteAsyncVault.latestEpochID();
+
+        // Create withdrawal request
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        // Pause the vault
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteAsyncVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteAsyncVault.pause();
+
+        // Should not be able to cancel request when paused
+        vm.prank(user1);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteAsyncVault.cancelRequest(currentEpoch);
+    }
+
+    function testPausePreventsClaimWithdrawal() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 currentEpoch = concreteAsyncVault.latestEpochID();
+
+        // Create withdrawal request
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        // Process epoch
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+        concreteAsyncVault.processEpoch();
+        vm.stopPrank();
+
+        // Pause the vault
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteAsyncVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteAsyncVault.pause();
+
+        // Should not be able to claim withdrawal when paused
+        uint256[] memory epochIDs = new uint256[](1);
+        epochIDs[0] = currentEpoch;
+
+        vm.prank(user1);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteAsyncVault.claimWithdrawal(epochIDs);
+    }
+
+    function testPausePreventsProcessEpoch() public {
+        uint256 withdrawAmount = 100000e18;
+
+        // Create withdrawal request
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        // Close epoch
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        // Pause the vault
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteAsyncVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteAsyncVault.pause();
+
+        // Should not be able to process epoch when paused
+        vm.prank(withdrawalManager);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteAsyncVault.processEpoch();
+    }
+
+    function testPausePreventsCloseEpoch() public {
+        uint256 withdrawAmount = 100000e18;
+
+        // Create withdrawal request
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        // Pause the vault
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteAsyncVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteAsyncVault.pause();
+
+        // Should not be able to close epoch when paused
+        vm.prank(withdrawalManager);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteAsyncVault.closeEpoch();
+    }
+
+    function testPausePreventsMoveRequestToNextEpoch() public {
+        uint256 withdrawAmount = 100000e18;
+
+        // Create withdrawal request
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        // Pause the vault
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteAsyncVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteAsyncVault.pause();
+
+        // Should not be able to move request when paused
+        vm.prank(withdrawalManager);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteAsyncVault.moveRequestToNextEpoch(user1);
     }
 }

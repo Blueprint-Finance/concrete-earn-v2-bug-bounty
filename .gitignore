@@ -1,12 +1,36 @@
-# Node.js
-node_modules
+# Compiler files
+cache/
+out/
 
-# Foundry
-out
-cache
+# node_modules
+node_modules/
 
-# Environment variables
+# Ignores development broadcast logs
+!/broadcast
+/broadcast/*/31337/
+/broadcast/**/dry-run/
+
+# Docs
+docs/
+
+# Dotenv file
+*.env
 .env
+.venv
+*.ipynb
+*REMEDIATION_PROOF_OF_CONCEPT*.sol
 
-# OS 
-.DS_Store
+# coverage
+lcov.info
+
+# misc
+CLAUDE.local.md
+.mcp.json
+
+# DS Store 
+*.DS_Store
+
+doc/internal_audit_temp
+package-lock.json
+
+CLAUDE.md

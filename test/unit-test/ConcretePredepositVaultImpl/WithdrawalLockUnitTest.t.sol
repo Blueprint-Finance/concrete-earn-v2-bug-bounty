@@ -6,6 +6,8 @@ import {IConcretePredepositVaultImpl} from "../../../src/interface/IConcretePred
 import {IConcreteStandardVaultImpl} from "../../../src/interface/IConcreteStandardVaultImpl.sol";
 import {IAccessControl} from "@openzeppelin-contracts/access/IAccessControl.sol";
 import {ConcreteV2RolesLib as RolesLib} from "../../../src/lib/Roles.sol";
+import {ERC4626Upgradeable} from "@openzeppelin-upgradeable/token/ERC20/extensions/ERC4626Upgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
 
 contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
     address public user1;
@@ -93,8 +95,9 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
 
         // Try to withdraw (should fail)
         vm.expectRevert(
-            abi.encodeWithSelector(IConcreteStandardVaultImpl.AssetAmountOutOfBounds.selector, user1, 1000e18, 0, 0)
+            abi.encodeWithSelector(ERC4626Upgradeable.ERC4626ExceededMaxWithdraw.selector, user1, 1000e18, 0)
         );
+
         vm.prank(user1);
         predepositVault.withdraw(1000e18, user1, user1);
     }
@@ -125,9 +128,7 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
 
         // Try to redeem (should fail)
         vm.expectRevert(
-            abi.encodeWithSelector(
-                IConcreteStandardVaultImpl.AssetAmountOutOfBounds.selector, user1, expectedAssets, 0, 0
-            )
+            abi.encodeWithSelector(ERC4626Upgradeable.ERC4626ExceededMaxRedeem.selector, user1, expectedAssets, 0)
         );
         vm.prank(user1);
         predepositVault.redeem(sharesToRedeem, user1, user1);
@@ -256,17 +257,16 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
         // Disable withdrawals
         vm.prank(vaultManager);
         predepositVault.setWithdrawLimits(0, 0);
-
         // User1 cannot withdraw
         vm.expectRevert(
-            abi.encodeWithSelector(IConcreteStandardVaultImpl.AssetAmountOutOfBounds.selector, user1, 100e18, 0, 0)
+            abi.encodeWithSelector(ERC4626Upgradeable.ERC4626ExceededMaxWithdraw.selector, user1, 100e18, 0)
         );
         vm.prank(user1);
         predepositVault.withdraw(100e18, user1, user1);
 
         // User2 cannot withdraw
         vm.expectRevert(
-            abi.encodeWithSelector(IConcreteStandardVaultImpl.AssetAmountOutOfBounds.selector, user2, 100e18, 0, 0)
+            abi.encodeWithSelector(ERC4626Upgradeable.ERC4626ExceededMaxWithdraw.selector, user2, 100e18, 0)
         );
         vm.prank(user2);
         predepositVault.withdraw(100e18, user2, user2);
@@ -299,5 +299,18 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
 
         // Preview results should be the same
         assertEq(previewLocked, previewUnlocked, "Preview should still work when locked");
+    }
+
+    function testPausePreventsDeposit() public {
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        predepositVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        predepositVault.pause();
+
+        vm.prank(user1);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        predepositVault.deposit(1000e18, user1);
     }
 }

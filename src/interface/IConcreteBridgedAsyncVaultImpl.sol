@@ -21,6 +21,11 @@ interface IConcreteBridgedAsyncVaultImpl is IConcreteAsyncVaultImpl {
     error NotInitialMint();
 
     /**
+     * @dev Thrown when attempting to mint unbacked shares when deposit limits are not zero.
+     */
+    error DepositLimitsNotZero();
+
+    /**
      * @dev Emitted when unbacked shares are minted.
      * @param shares The amount of shares minted without backing assets.
      */

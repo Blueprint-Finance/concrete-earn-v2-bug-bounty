@@ -31,7 +31,7 @@ contract PerformanceFeeE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         vm.prank(vaultManager);
         concreteStandardVault.updatePerformanceFee(PERFORMANCE_FEE_BPS);
 
-        strategy = new ERC4626StrategyMock(address(asset));
+        strategy = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
 
         addStrategyWithDeallocationOrder(address(strategy), address(concreteStandardVault), allocator, strategyOperator);
 
@@ -64,6 +64,7 @@ contract PerformanceFeeE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
             Math.Rounding.Floor
         );
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         uint256 recipientBalanceAfter = concreteStandardVault.balanceOf(performanceFeeRecipient);
@@ -81,6 +82,7 @@ contract PerformanceFeeE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         uint256 recipientBalanceBefore = concreteStandardVault.balanceOf(performanceFeeRecipient);
         uint256 totalSupplyBefore = concreteStandardVault.totalSupply();
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         uint256 recipientBalanceAfter = concreteStandardVault.balanceOf(performanceFeeRecipient);
@@ -110,6 +112,7 @@ contract PerformanceFeeE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
             Math.Rounding.Floor
         );
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
         uint256 recipientBalanceAfter = concreteStandardVault.balanceOf(performanceFeeRecipient);
 
@@ -132,6 +135,7 @@ contract PerformanceFeeE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
             Math.Rounding.Floor
         );
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
         recipientBalanceAfter = concreteStandardVault.balanceOf(performanceFeeRecipient);
 
@@ -149,6 +153,7 @@ contract PerformanceFeeE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         uint256 userAssetsBefore = concreteStandardVault.previewRedeem(userSharesBefore);
 
         _simulateYield(YIELD_AMOUNT);
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         uint256 userSharesAfter = concreteStandardVault.balanceOf(user1);
@@ -184,6 +189,7 @@ contract PerformanceFeeE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         uint256 user2SharesBefore = concreteStandardVault.balanceOf(user2);
         uint256 recipientBalanceBefore = concreteStandardVault.balanceOf(performanceFeeRecipient);
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         assertEq(concreteStandardVault.balanceOf(user1), user1SharesBefore);
@@ -216,6 +222,7 @@ contract PerformanceFeeE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         uint256 recipientBalanceBefore = concreteStandardVault.balanceOf(performanceFeeRecipient);
         uint256 totalSupplyBefore = concreteStandardVault.totalSupply();
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         uint256 recipientBalanceAfter = concreteStandardVault.balanceOf(performanceFeeRecipient);
@@ -255,6 +262,7 @@ contract PerformanceFeeE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         uint256 recipientBalanceBefore = concreteStandardVault.balanceOf(performanceFeeRecipient);
         uint256 totalSupplyBefore = concreteStandardVault.totalSupply();
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         uint256 recipientBalanceAfter = concreteStandardVault.balanceOf(performanceFeeRecipient);
@@ -278,6 +286,7 @@ contract PerformanceFeeE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         uint256 netPositiveYield = _getActualYield();
         require(netPositiveYield > 0, "Expected net positive yield");
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         uint256 recipientBalanceAfter = concreteStandardVault.balanceOf(performanceFeeRecipient);

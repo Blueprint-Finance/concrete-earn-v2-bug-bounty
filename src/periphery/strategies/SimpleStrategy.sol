@@ -14,11 +14,25 @@ import {StrategyType} from "../../interface/IStrategyTemplate.sol";
  * @dev Uses EIP-7201 storage layout for upgradeability and caches deposit balance in storage.
  */
 contract SimpleStrategy is BaseStrategy {
+    function ID() public pure virtual override(BaseStrategy) returns (uint64) {
+        // contractType=2 (strategy), flavour=1 (simple-strategy), version=1.1.0 (major=1, minor=1, patch=0)
+        return uint64(200110100); // ContractIdEncoding.encode(2, 1, 1, 01, 00);
+    }
+
     /**
      * @dev Constructor that disables initializers
      */
     constructor() {
         _disableInitializers();
+    }
+
+    /**
+     * @dev External initializer function
+     * @param admin The address that will have admin role
+     * @param vault_ The address of the authorized vault
+     */
+    function initialize(address admin, address vault_) external virtual initializer {
+        __BaseStrategy_init(admin, vault_);
     }
 
     /**

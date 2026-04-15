@@ -231,6 +231,30 @@ Withdrawal Manager can process claims for multiple users in a single epoch:
    └── Optimized for gas efficiency with single epoch price lookup
 ```
 
+### 4.5 Priority Withdrawal Flow
+
+Users who need immediate access to funds can request a priority withdrawal that bypasses the epoch cycle. The operator unwinds the position, deallocates the net amount back to the vault, and calls `claimPriorityWithdrawal`. The unwind cost is deducted from the user's withdrawal and recorded on the strategy via `IAsyncAccounting.adjustTotalAssets`, which the next yield accrual reconciles automatically.
+
+```
+Operator fast-track flow:
+
+1. accrueYield()               ← optional, only if exchange rate changed
+2. Unwind position              ← off-chain / underlying protocol
+3. deallocate(grossAssets - unwindCost)
+4. claimPriorityWithdrawal(user, sharesToFulfil, unwindCost, strategy)
+   ├── withYieldAccrual modifier runs first
+   ├── cachedTotalAssets -= netAssets
+   ├── Shares burned, request cleared/reduced
+   ├── strategy.adjustTotalAssets(-unwindCost)
+   └── netAssets transferred to user
+```
+
+- **Role**: `PRIORITY_WITHDRAWAL_EXECUTOR` (granted to vault manager by default)
+- **Unwind cost cap**: Configurable via `setUnwindCostCap` (default 5%)
+- **Exchange rate**: Unchanged from the user perspective (`convertToAssets` previews pending yield delta)
+
+See [PriorityWithdrawal.md](PriorityWithdrawal.md) for the full specification.
+
 ---
 
 ## 5. Sequence Diagrams

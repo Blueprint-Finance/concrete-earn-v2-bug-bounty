@@ -60,7 +60,7 @@ contract SimpleStrategyE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
 
         // Create proxy and initialize
         bytes memory initData =
-            abi.encodeWithSelector(BaseStrategy.initialize.selector, admin, address(concreteStandardVault));
+            abi.encodeWithSelector(SimpleStrategy.initialize.selector, admin, address(concreteStandardVault));
 
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initData);
         return SimpleStrategy(address(proxy));

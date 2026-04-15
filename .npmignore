@@ -1,0 +1,46 @@
+# Build & cache
+/cache/
+/out/
+
+# Tests & scripts
+/script/
+
+# Audits
+/audit/
+
+# Foundry
+/lib/
+/broadcast/
+
+# Deployment scripts
+/deployment-scripts/
+
+# CI & docs
+/.github/
+/doc/
+
+# Repo-only metadata
+.gitattributes
+.gitmodules
+.editorconfig
+
+# Local config that shouldn't ship
+.npmrc
+.env
+.env.*
+/.idea/
+
+# Lockfiles
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# OS & logs
+.DS_Store
+*.log
+
+# Misc
+*.csv
+*.txt
+!remappings.txt
+/depositTests/

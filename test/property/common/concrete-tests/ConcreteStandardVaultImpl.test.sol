@@ -39,7 +39,7 @@ abstract contract ConcreteStandardVaultImplTest is ConcreteStandardVaultImplProp
 
         // Deploy and add strategies to vault
         for (uint256 i = 0; i < numStrategies; i++) {
-            ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(_underlying_));
+            ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(_underlying_), address(_vault_));
 
             // Add strategy to vault
             vm.prank(_getStrategyOperator());

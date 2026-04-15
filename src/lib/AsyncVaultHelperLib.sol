@@ -12,6 +12,9 @@ import {IConcreteStandardVaultImpl} from "../interface/IConcreteStandardVaultImp
 import {
     ConcreteCachedVaultStateStorageLib as CachedVaultStateLib
 } from "../lib/storage/ConcreteCachedVaultStateStorageLib.sol";
+import {ConcreteStandardVaultImplStorageLib as SVLib} from "../lib/storage/ConcreteStandardVaultImplStorageLib.sol";
+import {EnumerableSet} from "@openzeppelin-contracts/utils/structs/EnumerableSet.sol";
+import {IAsyncAccounting} from "../interface/IAsyncAccounting.sol";
 
 struct ClaimWithdrawalParams {
     uint256 epochID;
@@ -24,6 +27,9 @@ struct ClaimWithdrawalParams {
 library AsyncVaultHelperLib {
     using Math for uint256;
     using SafeERC20 for IERC20;
+
+    /// @dev Basis points constant (10000 = 100%)
+    uint256 public constant BASIS_POINTS = 10000;
 
     // ─────────────────────────────────────────────────────────────────────────────
     // Epoch Lifecycle Functions
@@ -81,6 +87,16 @@ library AsyncVaultHelperLib {
     }
 
     function claimWithdrawal(address asset, address user, uint256[] calldata epochIDs, uint8 decimals) public {
+        claimWithdrawalTo(asset, user, epochIDs, decimals, user);
+    }
+
+    function claimWithdrawalTo(
+        address asset,
+        address user,
+        uint256[] calldata epochIDs,
+        uint8 decimals,
+        address recipient
+    ) public {
         ConcreteAsyncVaultImplStorageLib.ConcreteAsyncVaultImplStorage storage $ =
             ConcreteAsyncVaultImplStorageLib.fetch();
 
@@ -103,8 +119,10 @@ library AsyncVaultHelperLib {
         // Update accounting
         $.pastEpochsUnclaimedAssets -= wwl.totalAssetsSum;
 
+        require(recipient != address(0), IConcreteAsyncVaultImpl.ZeroAddress());
+
         // Transfer all assets at once
-        IERC20(asset).safeTransfer(user, wwl.totalAssetsSum);
+        IERC20(asset).safeTransfer(recipient, wwl.totalAssetsSum);
 
         emit IConcreteAsyncVaultImpl.RequestClaimed(user, wwl.totalAssetsSum, epochIDs);
     }
@@ -249,5 +267,76 @@ library AsyncVaultHelperLib {
 
     function _epochIsOpen(uint256 epochID) private view returns (bool) {
         return epochID >= ConcreteAsyncVaultImplStorageLib.fetch().latestEpochID;
+    }
+
+    function _requireStrategyRegisteredAndActive(address strategy) private view {
+        SVLib.ConcreteStandardVaultImplStorage storage $std = SVLib.fetch();
+        require(EnumerableSet.contains($std.strategies, strategy), IConcreteStandardVaultImpl.StrategyDoesNotExist());
+        require(
+            $std.strategyData[strategy].status == IConcreteStandardVaultImpl.StrategyStatus.Active,
+            IConcreteStandardVaultImpl.StrategyIsHalted()
+        );
+    }
+
+    function claimPriorityWithdrawal(
+        address asset,
+        address user,
+        uint256 sharesToFulfil,
+        uint256 unwindCost,
+        uint256 lockedAssets,
+        address strategy
+    ) public {
+        ConcreteAsyncVaultImplStorageLib.ConcreteAsyncVaultImplStorage storage $ =
+            ConcreteAsyncVaultImplStorageLib.fetch();
+        CachedVaultStateLib.ConcreteCachedVaultStateStorage storage $cached = CachedVaultStateLib.fetch();
+
+        require(sharesToFulfil > 0, IConcreteAsyncVaultImpl.ZeroShares());
+        require(user != address(0), IConcreteAsyncVaultImpl.ZeroAddress());
+        require(
+            sharesToFulfil <= $.userEpochRequests[user][$.latestEpochID],
+            IConcreteStandardVaultImpl.InsufficientShares()
+        );
+        require(strategy != address(0), IConcreteAsyncVaultImpl.ZeroAddress());
+        _requireStrategyRegisteredAndActive(strategy);
+
+        // Calculate gross assets based on shares to fulfil and current exchange rate
+        uint256 grossAssets = ConversionLib.calcConvertToAssets(
+            sharesToFulfil, ERC20_OZ_5_2_0_Lib.totalSupply(), $cached.cachedTotalAssets, Math.Rounding.Floor, true
+        );
+
+        // Calculate maximum allowed unwind cost based on unwind cost cap
+        uint256 maxUnwindCost = grossAssets.mulDiv($.unwindCostCapBP, BASIS_POINTS, Math.Rounding.Floor);
+        require(unwindCost <= maxUnwindCost && unwindCost < grossAssets, IConcreteAsyncVaultImpl.UnwindCostTooHigh());
+
+        uint256 netAssets = grossAssets - unwindCost;
+
+        uint256 floatingFunds = IERC20(asset).balanceOf(address(this));
+        uint256 availableAssets = floatingFunds > lockedAssets ? floatingFunds - lockedAssets : 0;
+        require(availableAssets >= netAssets, IConcreteStandardVaultImpl.InsufficientBalance());
+
+        // Update storage
+        $.userEpochRequests[user][$.latestEpochID] -= sharesToFulfil;
+        $.totalRequestedSharesPerEpoch[$.latestEpochID] -= sharesToFulfil;
+
+        // Update cached total assets (subtract net assets sent out to user)
+        $cached.cachedTotalAssets -= netAssets;
+
+        // Burn the shares that are being fulfilled
+        ERC20_OZ_5_2_0_Lib._burn(address(this), sharesToFulfil);
+
+        // Adjust the strategy's reported allocation so the next yield accrual
+        // reconciles the unwind cost without double-counting.
+        // This also bumps the strategy's accounting nonce to prevent race
+        // conditions with other accounting sources (e.g. operator adjustments).
+        if (unwindCost > 0) {
+            IAsyncAccounting(strategy).adjustTotalAssets(-int256(unwindCost));
+        }
+
+        // Transfer net assets to user
+        IERC20(asset).safeTransfer(user, netAssets);
+
+        emit IConcreteAsyncVaultImpl.PriorityWithdrawalClaimed(
+            user, sharesToFulfil, grossAssets, unwindCost, netAssets, $.latestEpochID
+        );
     }
 }

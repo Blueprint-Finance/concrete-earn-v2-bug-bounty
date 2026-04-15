@@ -5,6 +5,8 @@ import {Hooks} from "../../../src/interface/IHook.sol";
 import {StandardHookV1Mock} from "../../mock/StandardHookV1.sol";
 import {ConcreteStandardVaultImplBaseSetup} from "../../common/ConcreteStandardVaultImplBaseSetup.t.sol";
 import {HooksLibV1} from "../../../src/lib/Hooks.sol";
+import {PausableUpgradeable} from "@openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
+import {ConcreteV2RolesLib as RolesLib} from "../../../src/lib/Roles.sol";
 
 contract HooksUnitTest is ConcreteStandardVaultImplBaseSetup {
     address alice;
@@ -43,6 +45,9 @@ contract HooksUnitTest is ConcreteStandardVaultImplBaseSetup {
         // expect the hook to be called
         assertEq(mockHook.depositLimit(), depositLimit);
         assertEq(concreteStandardVault.balanceOf(alice), 1 ether);
+        // get the list of deployed hoooks
+        Hooks memory deployedHooks = concreteStandardVault.getHooks();
+        assertEq(deployedHooks.target, address(mockHook));
     }
 
     function test_preDeposit_withHooks_fail() public {
@@ -178,5 +183,21 @@ contract HooksUnitTest is ConcreteStandardVaultImplBaseSetup {
         vm.expectRevert(abi.encodeWithSelector(StandardHookV1Mock.NotOwner.selector));
         concreteStandardVault.redeem(1 ether, alice, alice);
         vm.stopPrank();
+    }
+
+    function testPausePreventsSetHooks() public {
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteStandardVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteStandardVault.pause();
+
+        uint96 flags = set_flag(HooksLibV1.PRE_DEPOSIT);
+        Hooks memory hooks = Hooks({target: address(mockHook), flags: flags});
+
+        vm.prank(hookManager);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteStandardVault.setHooks(hooks);
     }
 }

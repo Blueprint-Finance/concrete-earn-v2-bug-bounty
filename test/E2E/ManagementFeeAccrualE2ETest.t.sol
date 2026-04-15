@@ -31,7 +31,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         user1 = makeAddr("user1");
         managementFeeRecipient = makeAddr("managementFeeRecipient");
 
-        strategy = new ERC4626StrategyMock(address(asset));
+        strategy = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
 
         addStrategyWithDeallocationOrder(address(strategy), address(concreteStandardVault), allocator, strategyOperator);
 
@@ -52,13 +52,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         concreteStandardVault.updateManagementFee(MANAGEMENT_FEE_BPS);
 
         // Verify the fee is set correctly
-        (
-            address recipient,
-            uint16 fee,
-            /**
-             * uint32 lastAccrual
-             */
-        ) = concreteStandardVault.managementFee();
+        (uint16 fee, address recipient,,,) = concreteStandardVault.getFeeConfig();
         assertEq(fee, MANAGEMENT_FEE_BPS);
         assertEq(recipient, managementFeeRecipient);
     }
@@ -81,7 +75,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         uint256 totalAssetsBefore = concreteStandardVault.cachedTotalAssets();
 
         // Calculate expected shares for 2 days
-        (,, uint32 lastAccrual) = concreteStandardVault.managementFee();
+        (,, uint32 lastAccrual,,) = concreteStandardVault.getFeeConfig();
         uint256 annualFeeAmount = (totalAssetsBefore * MANAGEMENT_FEE_BPS_E2E) / 10_000;
         uint256 expectedFeeAmount = (annualFeeAmount * (block.timestamp - lastAccrual)) / ONE_YEAR;
         uint256 expectedShares = InvariantUtils.convertToShares(
@@ -89,6 +83,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         );
 
         // Trigger yield accrual which should accrue 2 days worth of management fees
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         uint256 recipientBalanceAfter = concreteStandardVault.balanceOf(managementFeeRecipient);
@@ -99,10 +94,11 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         assertEq(totalSupplyAfter - totalSupplyBefore, expectedShares);
 
         // Verify timestamp was updated
-        (,, lastAccrual) = concreteStandardVault.managementFee();
+        (,, lastAccrual,,) = concreteStandardVault.getFeeConfig();
         assertEq(lastAccrual, block.timestamp);
 
         uint256 recipientBalanceBeforeDoubleTest = concreteStandardVault.balanceOf(managementFeeRecipient);
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
         uint256 recipientBalanceAfterDoubleTest = concreteStandardVault.balanceOf(managementFeeRecipient);
         // No additional fees should be charged
@@ -116,13 +112,14 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         totalAssetsBefore = concreteStandardVault.cachedTotalAssets();
 
         // Calculate expected shares for 1 year
-        (,, lastAccrual) = concreteStandardVault.managementFee();
+        (,, lastAccrual,,) = concreteStandardVault.getFeeConfig();
         annualFeeAmount = (totalAssetsBefore * MANAGEMENT_FEE_BPS_E2E) / 10_000;
         expectedFeeAmount = (annualFeeAmount * (block.timestamp - lastAccrual)) / ONE_YEAR;
         expectedShares = InvariantUtils.convertToShares(
             expectedFeeAmount, totalSupplyBefore, totalAssetsBefore - expectedFeeAmount, Math.Rounding.Floor
         );
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         recipientBalanceAfter = concreteStandardVault.balanceOf(managementFeeRecipient);
@@ -139,11 +136,13 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         concreteStandardVault.deposit(INITIAL_DEPOSIT, user1);
         vm.stopPrank();
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         uint256 recipientBalanceBefore = concreteStandardVault.balanceOf(managementFeeRecipient);
         uint256 totalSupplyBefore = concreteStandardVault.totalSupply();
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         assertEq(concreteStandardVault.balanceOf(managementFeeRecipient), recipientBalanceBefore);
@@ -172,7 +171,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         uint256 totalSupplyBefore = concreteStandardVault.totalSupply();
         uint256 totalAssetsBefore = concreteStandardVault.cachedTotalAssets();
 
-        (,, uint32 lastAccrual) = concreteStandardVault.managementFee();
+        (,, uint32 lastAccrual,,) = concreteStandardVault.getFeeConfig();
         uint256 annualFeeAmount = (totalAssetsBefore * MANAGEMENT_FEE_BPS) / 10_000;
         uint256 expectedFeeAmount = (annualFeeAmount * (block.timestamp - lastAccrual)) / ONE_YEAR;
         uint256 expectedFeeShares = InvariantUtils.convertToShares(
@@ -204,7 +203,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         concreteStandardVault.updateManagementFee(0);
 
         // Verify fee is set to 0
-        (address recipient, uint16 fee,) = concreteStandardVault.managementFee();
+        (uint16 fee, address recipient,,,) = concreteStandardVault.getFeeConfig();
         assertEq(fee, 0, "Management fee should be set to 0");
         assertEq(recipient, managementFeeRecipient, "Recipient should remain the same");
 
@@ -223,18 +222,19 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
 
         // Record state before yield accrual
         uint256 recipientBalanceBefore = concreteStandardVault.balanceOf(managementFeeRecipient);
-        (,, uint32 lastAccrualBefore) = concreteStandardVault.managementFee();
+        (,, uint32 lastAccrualBefore,,) = concreteStandardVault.getFeeConfig();
 
         console.log("Time before accrual:", block.timestamp);
         console.log("Last accrual before:", lastAccrualBefore);
         console.log("Recipient balance before:", recipientBalanceBefore);
 
         // Force yield accrual (this should update timestamp even with 0 fee)
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         // Record state after yield accrual
         uint256 recipientBalanceAfter = concreteStandardVault.balanceOf(managementFeeRecipient);
-        (,, uint32 lastAccrualAfter) = concreteStandardVault.managementFee();
+        (,, uint32 lastAccrualAfter,,) = concreteStandardVault.getFeeConfig();
 
         console.log("Last accrual after:", lastAccrualAfter);
         console.log("Recipient balance after:", recipientBalanceAfter);
@@ -249,12 +249,13 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
 
         // Verify that calling accrueYield again immediately doesn't change anything
         uint256 recipientBalanceBeforeSecond = concreteStandardVault.balanceOf(managementFeeRecipient);
-        (,, uint32 lastAccrualBeforeSecond) = concreteStandardVault.managementFee();
+        (,, uint32 lastAccrualBeforeSecond,,) = concreteStandardVault.getFeeConfig();
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         uint256 recipientBalanceAfterSecond = concreteStandardVault.balanceOf(managementFeeRecipient);
-        (,, uint32 lastAccrualAfterSecond) = concreteStandardVault.managementFee();
+        (,, uint32 lastAccrualAfterSecond,,) = concreteStandardVault.getFeeConfig();
 
         // Verify no changes since no time elapsed
         assertEq(
@@ -273,7 +274,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         concreteStandardVault.updateManagementFee(500); // 5%
 
         // Verify fee is set to 5%
-        (address recipient, uint16 fee,) = concreteStandardVault.managementFee();
+        (uint16 fee, address recipient,,,) = concreteStandardVault.getFeeConfig();
         assertEq(fee, 500, "Initial management fee should be 5%");
 
         // Make initial deposit - should not charge any fee
@@ -291,7 +292,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
 
         // Record state before yield accrual
         uint256 recipientBalanceBefore = concreteStandardVault.balanceOf(managementFeeRecipient);
-        (,, uint32 lastAccrual) = concreteStandardVault.managementFee();
+        (,, uint32 lastAccrual,,) = concreteStandardVault.getFeeConfig();
         uint256 totalAssetsBefore = concreteStandardVault.cachedTotalAssets();
         uint256 totalSupplyBefore = concreteStandardVault.totalSupply();
 
@@ -304,7 +305,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
 
         // Verify the vault fee updated to 10%
         uint32 newLastAccrual;
-        (recipient, fee, newLastAccrual) = concreteStandardVault.managementFee();
+        (fee, recipient, newLastAccrual,,) = concreteStandardVault.getFeeConfig();
         assertEq(fee, 1000, "Vault fee updatet to 10%");
 
         // Verify fees were accrued for the first 30 days at 5%
@@ -321,6 +322,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         console.log("Total supply before accrual:", totalSupplyBefore);
 
         // Force yield accrual
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         // Record state after yield accrual
@@ -369,7 +371,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         console.log("Large deposit amount:", LARGE_DEPOSIT / 1e18);
         console.log("Management fee rate:", MANAGEMENT_FEE_BPS);
 
-        (,, uint32 lastAccrual) = concreteStandardVault.managementFee();
+        (,, uint32 lastAccrual,,) = concreteStandardVault.getFeeConfig();
         console.log("initial lastAccrual", lastAccrual);
 
         assertEq(lastAccrual, block.timestamp); // Should be deploy time initially
@@ -389,7 +391,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         uint256 sharesReceived = concreteStandardVault.deposit(LARGE_DEPOSIT / 2, user1);
         vm.stopPrank();
 
-        (,, lastAccrual) = concreteStandardVault.managementFee();
+        (,, lastAccrual,,) = concreteStandardVault.getFeeConfig();
         console.log("lastAccrual after first deposit", lastAccrual);
 
         console.log("Shares received:", sharesReceived);
@@ -443,6 +445,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         console.log("Expected fee shares:", expectedFeeShares);
 
         // Force yield accrual (this should trigger management fee accrual)
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         // Record state after yield accrual
@@ -483,7 +486,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         assertApproxEqRel(expectedFeePercentage, 500, 0.01e18, "Fee should be approximately 5%");
 
         // Verify timestamp was updated
-        (,, uint32 newLastAccrual) = concreteStandardVault.managementFee();
+        (,, uint32 newLastAccrual,,) = concreteStandardVault.getFeeConfig();
         assertEq(newLastAccrual, block.timestamp, "Last accrual timestamp should be updated");
 
         console.log("Test passed - 5% management fee correctly charged");
@@ -500,6 +503,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         uint256 recipientBalanceBefore = concreteStandardVault.balanceOf(managementFeeRecipient);
 
         // Force yield accrual immediately (no time elapsed)
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         // Record state after yield accrual
@@ -526,6 +530,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
         uint256 recipientBalanceBefore = concreteStandardVault.balanceOf(managementFeeRecipient);
 
         // Force yield accrual
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         // Record state after yield accrual
@@ -570,6 +575,7 @@ contract ManagementFeeAccrualTest is ConcreteStandardVaultImplBaseSetup, AddStra
             uint256 recipientBalanceBefore = concreteStandardVault.balanceOf(managementFeeRecipient);
 
             // Force yield accrual
+            vm.prank(allocator);
             concreteStandardVault.accrueYield();
 
             uint256 recipientBalanceAfter = concreteStandardVault.balanceOf(managementFeeRecipient);

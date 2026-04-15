@@ -69,6 +69,16 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
     error EmptyUsers();
 
     /**
+     * @dev Thrown when attempting to claim with unwind cost that exceeds the unwind cost cap.
+     */
+    error UnwindCostTooHigh();
+
+    /**
+     * @dev Thrown when attempting to set an invalid unwind cost cap.
+     */
+    error InvalidUnwindCostCap();
+
+    /**
      * @dev Emitted when the withdrawal queue is initialized.
      * @param epochID The initial epoch ID.
      */
@@ -147,6 +157,24 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
     event RequestMovedToNextEpoch(address indexed user, uint256 shares, uint256 currentEpochID, uint256 nextEpochID);
 
     /**
+     * @dev Emitted when a user's priority withdrawal is claimed.
+     * @param user The address of the user claiming the withdrawal.
+     * @param shares The amount of shares claimed/fulfilled.
+     * @param grossAssets The amount of gross assets before deducting unwind cost based on current exchange rate
+     * @param unwindCost The amount paid by user as a priority wwl fee (operational cost).
+     * @param netAssets The amount of assets claimed by user after deducting unwind cost.
+     * @param epochID The epoch from which the withdrawal was claimed.
+     */
+    event PriorityWithdrawalClaimed(
+        address indexed user,
+        uint256 shares,
+        uint256 grossAssets,
+        uint256 unwindCost,
+        uint256 netAssets,
+        uint256 epochID
+    );
+
+    /**
      * @dev Emitted when an epoch is closed.
      * @param epochID The epoch that was closed.
      */
@@ -201,6 +229,22 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
      * @param epochIDs Array of epoch IDs to claim from
      */
     function claimWithdrawal(address user, uint256[] calldata epochIDs) external;
+
+    /**
+     * @notice Claim a priority withdrawal.
+     * @dev Only callable by PRIORITY_WITHDRAWAL_EXECUTOR role.
+     *      Burns the user's queued shares, transfers `grossAssets - unwindCost` to the
+     *      user, deducts the net amount from `cachedTotalAssets`, and calls `IAsyncAccounting.adjustTotalAssets`
+     *      on the strategy to record the unwind cost.  The next yield accrual will
+     *      reconcile the vault's tracked allocation with the strategy.
+     * @param user The user address to claim from.
+     * @param sharesToFulfil The number of shares to burn.
+     * @param unwindCost The cost charged for early unwinding.
+     * @param strategy The strategy whose `totalAllocatedValue` will be reduced by the
+     *                 unwind cost. Must not be `address(0)`.
+     */
+    function claimPriorityWithdrawal(address user, uint256 sharesToFulfil, uint256 unwindCost, address strategy)
+        external;
 
     /**
      * @notice Close the current epoch
@@ -307,4 +351,19 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
      * @dev Only callable by the ALLOCATOR role
      */
     function toggleQueueActive() external;
+
+    /**
+     * @notice Get the unwind cost cap for priority withdrawals
+     * @dev Returns the unwind cost cap in basis points (10000 = 100%)
+     * @return The unwind cost cap in basis points
+     */
+    function getUnwindCostCap() external view returns (uint16);
+
+    /**
+     * @notice Set the unwind cost cap for priority withdrawals
+     * @dev Only callable by the VAULT_MANAGER role
+     * @dev Unwind cost cap is in basis points (10000 = 100%)
+     * @param unwindCostCap_ The new unwind cost cap in basis points
+     */
+    function setUnwindCostCap(uint16 unwindCostCap_) external;
 }

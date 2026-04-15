@@ -27,8 +27,10 @@ import {SafeERC20} from "@openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol
 // ─────────────────────────────────────────────────────────────────────────────
 // Protocol-facing interfaces
 // ─────────────────────────────────────────────────────────────────────────────
+import {IContractId} from "../interface/IContractId.sol";
 import {IConcreteAsyncVaultImpl} from "../interface/IConcreteAsyncVaultImpl.sol";
 import {IConcreteStandardVaultImpl} from "../interface/IConcreteStandardVaultImpl.sol";
+import {IDefaultEnforcedVaultConfiguration} from "../interface/IDefaultEnforcedVaultConfiguration.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal contracts
@@ -42,24 +44,36 @@ import {AsyncVaultHelperLib} from "../lib/AsyncVaultHelperLib.sol";
 import {ConcreteV2ConversionLib as ConversionLib} from "../lib/Conversion.sol";
 import {ConcreteV2RolesLib as RolesLib} from "../../src/lib/Roles.sol";
 import {StateInitLib} from "../lib/StateInitLib.sol";
+import {StateSetterLib} from "../lib/StateSetterLib.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Storage layout libraries
 // ─────────────────────────────────────────────────────────────────────────────
 import {ConcreteAsyncVaultImplStorageLib} from "../lib/storage/ConcreteAsyncVaultImplStorageLib.sol";
+import {ContractIdEncoding} from "../lib/ContractIdEncoding.sol";
 
 contract ConcreteAsyncVaultImpl is ConcreteStandardVaultImpl, IConcreteAsyncVaultImpl {
     using Math for uint256;
     using SafeERC20 for IERC20;
     using SafeCast for uint256;
 
+    function ID() public pure virtual override(ConcreteStandardVaultImpl) returns (uint64) {
+        // contractType=0 (vault), flavour=2 (async vault), version=1.2.0 (major=1, minor=2, patch=0)
+        return uint64(210200); //ContractIdEncoding.encode(0, 2, 1, 02, 00);
+    }
+
     constructor(address factory) ConcreteStandardVaultImpl(factory) {}
 
     /**
      * @dev Override _initialize to set up async vault specific state
      */
-    function _initialize(uint64 initialVersion, address owner, bytes memory data) internal virtual override {
-        super._initialize(initialVersion, owner, data);
+    function _initialize(
+        uint64 initialVersion,
+        address owner,
+        IDefaultEnforcedVaultConfiguration.DefaultEnforcedVaultConfiguration calldata defaultEnforcedVaultConfig,
+        bytes memory data
+    ) internal virtual override {
+        super._initialize(initialVersion, owner, defaultEnforcedVaultConfig, data);
 
         address initialVaultManager;
         assembly {
@@ -88,22 +102,34 @@ contract ConcreteAsyncVaultImpl is ConcreteStandardVaultImpl, IConcreteAsyncVaul
     }
 
     /// @inheritdoc IConcreteAsyncVaultImpl
-    function cancelRequest(uint256 epochID) external virtual {
+    function cancelRequest(uint256 epochID) external virtual whenNotPaused {
         AsyncVaultHelperLib.cancelRequest(_msgSender(), epochID);
     }
 
     /// @inheritdoc IConcreteAsyncVaultImpl
-    function cancelRequest(address user, uint256 epochID) external virtual onlyRole(RolesLib.WITHDRAWAL_MANAGER) {
+    function cancelRequest(address user, uint256 epochID)
+        external
+        virtual
+        whenNotPaused
+        onlyRole(RolesLib.WITHDRAWAL_MANAGER)
+    {
         require(user != address(0), ZeroAddress());
         AsyncVaultHelperLib.cancelRequest(user, epochID);
     }
 
-    function closeEpoch() external virtual onlyRole(RolesLib.WITHDRAWAL_MANAGER) {
+    function closeEpoch() external virtual whenNotPaused onlyRole(RolesLib.WITHDRAWAL_MANAGER) {
         AsyncVaultHelperLib.closeEpoch();
     }
 
     /// @inheritdoc IConcreteAsyncVaultImpl
-    function processEpoch() external virtual withYieldAccrual nonReentrant onlyRole(RolesLib.WITHDRAWAL_MANAGER) {
+    function processEpoch()
+        external
+        virtual
+        whenNotPaused
+        withYieldAccrual
+        nonReentrant
+        onlyRole(RolesLib.WITHDRAWAL_MANAGER)
+    {
         // calculate share price without accruing yield or taking fees.
         uint8 decimals = decimals();
         AsyncVaultHelperLib.processEpoch(
@@ -133,7 +159,7 @@ contract ConcreteAsyncVaultImpl is ConcreteStandardVaultImpl, IConcreteAsyncVaul
     // Public functions
     /// @inheritdoc IConcreteAsyncVaultImpl
 
-    function claimWithdrawal(uint256[] calldata epochIDs) external virtual {
+    function claimWithdrawal(uint256[] calldata epochIDs) external virtual whenNotPaused {
         require(epochIDs.length > 0, EmptyEpochIDs());
         AsyncVaultHelperLib.claimWithdrawal(asset(), _msgSender(), epochIDs, decimals());
     }
@@ -142,6 +168,7 @@ contract ConcreteAsyncVaultImpl is ConcreteStandardVaultImpl, IConcreteAsyncVaul
     function claimWithdrawal(address user, uint256[] calldata epochIDs)
         external
         virtual
+        whenNotPaused
         onlyRole(RolesLib.WITHDRAWAL_MANAGER)
     {
         require(user != address(0), ZeroAddress());
@@ -152,10 +179,24 @@ contract ConcreteAsyncVaultImpl is ConcreteStandardVaultImpl, IConcreteAsyncVaul
     function claimUsersBatch(address[] calldata users, uint256 epochID)
         external
         virtual
+        whenNotPaused
         onlyRole(RolesLib.WITHDRAWAL_MANAGER)
     {
         require(users.length > 0, EmptyUsers());
         AsyncVaultHelperLib.claimUsersBatch(asset(), users, epochID, decimals());
+    }
+
+    function claimPriorityWithdrawal(address user, uint256 sharesToFulfil, uint256 unwindCost, address strategy)
+        external
+        virtual
+        whenNotPaused
+        withYieldAccrual
+        nonReentrant
+        onlyRole(RolesLib.PRIORITY_WITHDRAWAL_EXECUTOR)
+    {
+        AsyncVaultHelperLib.claimPriorityWithdrawal(
+            asset(), user, sharesToFulfil, unwindCost, _lockedAssets(), strategy
+        );
     }
 
     /**
@@ -163,7 +204,7 @@ contract ConcreteAsyncVaultImpl is ConcreteStandardVaultImpl, IConcreteAsyncVaul
      * @dev Validates inputs, determines amount to move, updates storage for both epochs.
      * @param user The user whose request to move
      */
-    function moveRequestToNextEpoch(address user) external onlyRole(RolesLib.WITHDRAWAL_MANAGER) {
+    function moveRequestToNextEpoch(address user) external whenNotPaused onlyRole(RolesLib.WITHDRAWAL_MANAGER) {
         require(user != address(0), ZeroAddress());
         AsyncVaultHelperLib.moveRequestToNextEpoch(user);
     }
@@ -252,6 +293,7 @@ contract ConcreteAsyncVaultImpl is ConcreteStandardVaultImpl, IConcreteAsyncVaul
         public
         virtual
         override(ConcreteStandardVaultImpl, IConcreteStandardVaultImpl)
+        whenNotPaused
     {
         super.allocate(data);
         require(
@@ -263,5 +305,15 @@ contract ConcreteAsyncVaultImpl is ConcreteStandardVaultImpl, IConcreteAsyncVaul
 
     function _lockedAssets() internal view override returns (uint256) {
         return ConcreteAsyncVaultImplStorageLib.fetch().pastEpochsUnclaimedAssets;
+    }
+
+    /// @inheritdoc IConcreteAsyncVaultImpl
+    function getUnwindCostCap() external view virtual returns (uint16) {
+        return ConcreteAsyncVaultImplStorageLib.fetch().unwindCostCapBP;
+    }
+
+    /// @inheritdoc IConcreteAsyncVaultImpl
+    function setUnwindCostCap(uint16 unwindCostCap_) external virtual onlyRole(RolesLib.VAULT_MANAGER) {
+        StateSetterLib.setUnwindCostCap(unwindCostCap_);
     }
 }

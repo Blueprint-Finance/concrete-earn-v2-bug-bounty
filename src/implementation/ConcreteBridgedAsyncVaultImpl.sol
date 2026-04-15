@@ -2,8 +2,10 @@
 pragma solidity ^0.8.24;
 
 import {ConcreteAsyncVaultImpl} from "./ConcreteAsyncVaultImpl.sol";
+import {IContractId} from "../interface/IContractId.sol";
 import {IConcreteBridgedAsyncVaultImpl} from "../interface/IConcreteBridgedAsyncVaultImpl.sol";
 import {ConcreteV2RolesLib as RolesLib} from "../lib/Roles.sol";
+import {ContractIdEncoding} from "../lib/ContractIdEncoding.sol";
 
 /**
  * @title ConcreteBridgedAsyncVaultImpl
@@ -16,6 +18,11 @@ import {ConcreteV2RolesLib as RolesLib} from "../lib/Roles.sol";
  *      This results in an exchange rate between the shares and the underlying assets that is equal to the predeposit vault.
  */
 contract ConcreteBridgedAsyncVaultImpl is ConcreteAsyncVaultImpl, IConcreteBridgedAsyncVaultImpl {
+    function ID() public pure virtual override(ConcreteAsyncVaultImpl) returns (uint64) {
+        // contractType=0 (vault), flavour=6 (async bridged vault), version=1.2.0 (major=1, minor=2, patch=0)
+        return uint64(610200); // ContractIdEncoding.encode(0, 6, 1, 02, 00);
+    }
+
     /**
      * @dev Constructor
      * @param factory The address of the factory
@@ -32,6 +39,8 @@ contract ConcreteBridgedAsyncVaultImpl is ConcreteAsyncVaultImpl, IConcreteBridg
     function unbackedMint(uint256 shares) external onlyRole(RolesLib.VAULT_MANAGER) {
         require(shares != 0, ZeroAmount());
         require(totalSupply() == 0, NotInitialMint());
+        (uint256 maxDepositLimit,) = getDepositLimits();
+        require(maxDepositLimit == 0, DepositLimitsNotZero());
         _mint(msg.sender, shares);
         emit UnbackedMint(shares);
     }

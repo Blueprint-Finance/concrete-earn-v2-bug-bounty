@@ -22,7 +22,12 @@ import {ERC1967Proxy} from "@openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.s
 import {MessagingFee} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 import {OptionsBuilder} from "@layerzerolabs/oapp-evm/contracts/oapp/libs/OptionsBuilder.sol";
 import {IPredepostVaultOApp} from "../../src/periphery/interface/IPredepostVaultOApp.sol";
-import {ERC4626StrategyMock} from "../mock/ERC4626StrategyMock.sol";
+import {ConcreteBridgedAsyncVaultImpl} from "../../src/implementation/ConcreteBridgedAsyncVaultImpl.sol";
+import {IConcreteBridgedAsyncVaultImpl} from "../../src/interface/IConcreteBridgedAsyncVaultImpl.sol";
+import {MultisigStrategy} from "../../src/periphery/strategies/MultisigStrategy.sol";
+import {PeripheryRolesLib} from "../../src/periphery/lib/PeripheryRolesLib.sol";
+import {StrategyType} from "../../src/interface/IStrategyTemplate.sol";
+import {IContractId} from "../../src/interface/IContractId.sol";
 
 /**
  * @title LayerZeroClaimE2ETest
@@ -42,14 +47,18 @@ contract LayerZeroClaimE2ETest is TestBaseSetup, TestHelperOz5 {
     address public user1;
     address public user2;
     address public user3;
+    address public strategyAdmin;
+    address public multisig;
+    address public destinationMultisig;
 
     ERC20Mock public asset;
     AllocateModule public allocateModule;
     ConcretePredepositVaultImpl public predepositVault; // Predeposit vault on chain A (source)
     PredepostVaultOApp public predepositVaultOApp; // OApp for predeposit vault
-    ConcreteStandardVaultImpl public destinationVault; // Standard vault on chain B (destination)
+    ConcreteBridgedAsyncVaultImpl public destinationVault; // Bridged vault on chain B (destination)
     ShareDistributor public distributor; // Real ShareDistributor on chain B
-    ERC4626StrategyMock public strategy;
+    MultisigStrategy public strategy;
+    MultisigStrategy public destinationStrategy; // Strategy for destination vault
 
     event SharesClaimedOnTargetChain(address indexed user, uint256 shares);
 
@@ -75,6 +84,9 @@ contract LayerZeroClaimE2ETest is TestBaseSetup, TestHelperOz5 {
         user1 = makeAddr("user1");
         user2 = makeAddr("user2");
         user3 = makeAddr("user3");
+        strategyAdmin = makeAddr("strategyAdmin");
+        multisig = makeAddr("multisig");
+        destinationMultisig = makeAddr("destinationMultisig");
     }
 
     function _deployContracts() private {
@@ -82,14 +94,21 @@ contract LayerZeroClaimE2ETest is TestBaseSetup, TestHelperOz5 {
         allocateModule = new AllocateModule();
 
         // Deploy and approve predeposit vault implementation
+        ConcretePredepositVaultImpl predepositVaultImpl = new ConcretePredepositVaultImpl(address(factory));
+        ConcreteBridgedAsyncVaultImpl bridgedAsyncVaultImpl = new ConcreteBridgedAsyncVaultImpl(address(factory));
         vm.startPrank(factoryOwner);
-        factory.approveImplementation(address(new ConcretePredepositVaultImpl(address(factory))));
+        factory.approveImplementation(address(predepositVaultImpl));
+        factory.approveImplementation(address(bridgedAsyncVaultImpl));
         vm.stopPrank();
+
+        // Get vault IDs
+        uint64 predepositVaultUint64 = uint64(IContractId(address(predepositVaultImpl)).ID());
+        uint64 bridgedAsyncVaulttUint64 = uint64(IContractId(address(bridgedAsyncVaultImpl)).ID());
 
         // Deploy predeposit vault on chain A
         predepositVault = ConcretePredepositVaultImpl(
             factory.create(
-                2,
+                predepositVaultUint64,
                 vaultOwner,
                 abi.encode(address(allocateModule), address(asset), vaultManager, "Concrete Predeposit Vault A", "CPVA")
             )
@@ -105,12 +124,12 @@ contract LayerZeroClaimE2ETest is TestBaseSetup, TestHelperOz5 {
             )
         );
 
-        // Deploy destination vault on chain B
-        destinationVault = ConcreteStandardVaultImpl(
+        // Deploy bridged async destination vault on chain B
+        destinationVault = ConcreteBridgedAsyncVaultImpl(
             factory.create(
-                1,
+                bridgedAsyncVaulttUint64,
                 vaultOwner,
-                abi.encode(address(allocateModule), address(asset), vaultManager, "Concrete Standard Vault B", "CSVB")
+                abi.encode(address(allocateModule), address(asset), vaultManager, "Concrete Bridged Vault B", "CBVB")
             )
         );
 
@@ -120,8 +139,33 @@ contract LayerZeroClaimE2ETest is TestBaseSetup, TestHelperOz5 {
         ERC1967Proxy distributorProxy = new ERC1967Proxy(address(distributorImpl), initData);
         distributor = ShareDistributor(address(distributorProxy));
 
-        // Deploy strategy
-        strategy = new ERC4626StrategyMock(address(asset));
+        // Deploy MultisigStrategy for source vault
+        MultisigStrategy strategyImpl = new MultisigStrategy();
+        bytes memory strategyInitData = abi.encodeWithSelector(
+            MultisigStrategy.initialize.selector,
+            strategyAdmin,
+            address(predepositVault),
+            multisig,
+            uint64(1000), // maxAccountingChangeThreshold (10%)
+            uint64(86400), // accountingValidityPeriod (1 day)
+            uint64(3600) // cooldownPeriod (1 hour)
+        );
+        ERC1967Proxy strategyProxy = new ERC1967Proxy(address(strategyImpl), strategyInitData);
+        strategy = MultisigStrategy(address(strategyProxy));
+
+        // Deploy MultisigStrategy for destination vault
+        MultisigStrategy destStrategyImpl = new MultisigStrategy();
+        bytes memory destStrategyInitData = abi.encodeWithSelector(
+            MultisigStrategy.initialize.selector,
+            strategyAdmin,
+            address(destinationVault),
+            destinationMultisig,
+            uint64(10000), // maxAccountingChangeThreshold (100%) - high threshold for setup
+            uint64(86400), // accountingValidityPeriod (1 day)
+            uint64(3600) // cooldownPeriod (1 hour)
+        );
+        ERC1967Proxy destStrategyProxy = new ERC1967Proxy(address(destStrategyImpl), destStrategyInitData);
+        destinationStrategy = MultisigStrategy(address(destStrategyProxy));
     }
 
     function _setupLabels() private {
@@ -132,6 +176,11 @@ contract LayerZeroClaimE2ETest is TestBaseSetup, TestHelperOz5 {
         vm.label(address(asset), "asset");
         vm.label(address(endpoints[aEid]), "endpointA");
         vm.label(address(endpoints[bEid]), "endpointB");
+        vm.label(address(strategy), "strategy");
+        vm.label(address(destinationStrategy), "destinationStrategy");
+        vm.label(strategyAdmin, "strategyAdmin");
+        vm.label(multisig, "multisig");
+        vm.label(destinationMultisig, "destinationMultisig");
     }
 
     function _configureConnections() private {
@@ -156,6 +205,10 @@ contract LayerZeroClaimE2ETest is TestBaseSetup, TestHelperOz5 {
         vm.startPrank(vaultManager);
         predepositVault.grantRole(RolesLib.STRATEGY_MANAGER, strategyOperator);
         predepositVault.grantRole(RolesLib.ALLOCATOR, allocator);
+
+        // Setup roles for destination vault
+        destinationVault.grantRole(RolesLib.STRATEGY_MANAGER, strategyOperator);
+        destinationVault.grantRole(RolesLib.ALLOCATOR, allocator);
         vm.stopPrank();
     }
 
@@ -212,13 +265,99 @@ contract LayerZeroClaimE2ETest is TestBaseSetup, TestHelperOz5 {
     }
 
     function _fundDistributor() private {
-        // Fund the distributor with vault shares (equivalent to total supply)
-        uint256 distributorFunding = predepositVault.totalSupply();
-        asset.mint(address(distributor), distributorFunding);
-        vm.startPrank(address(distributor));
-        asset.approve(address(destinationVault), distributorFunding);
-        destinationVault.deposit(distributorFunding, address(distributor));
+        // Fund the distributor using unbacked mint + direct multisig funding with 1.5x exchange rate
+        uint256 sharesToMint = predepositVault.totalSupply();
+        uint256 assetsToFund = (sharesToMint * 15) / 10; // 1.5x the shares for 1.5 exchange rate
+        vm.prank(vaultManager);
+        destinationVault.setDepositLimits(0, 0);
+        // Step 1: Unbacked mint shares to the distributor (via vault manager)
+        vm.prank(vaultManager);
+        destinationVault.unbackedMint(sharesToMint);
+
+        // Verify shares were minted without assets
+        assertEq(destinationVault.balanceOf(vaultManager), sharesToMint, "Shares should be minted to vault manager");
+        assertEq(destinationVault.totalSupply(), sharesToMint, "Total supply should equal minted shares");
+        assertEq(destinationVault.totalAssets(), 0, "Total assets should still be 0");
+
+        // Step 2: Transfer shares from vault manager to distributor
+        vm.prank(vaultManager);
+        destinationVault.transfer(address(distributor), sharesToMint);
+
+        // Step 3: Add strategy to destination vault
+        vm.prank(strategyOperator);
+        destinationVault.addStrategy(address(destinationStrategy));
+
+        // Set deallocation order for destination vault
+        address[] memory order = new address[](1);
+        order[0] = address(destinationStrategy);
+        vm.prank(allocator);
+        destinationVault.setDeallocationOrder(order);
+
+        // Step 4: Send assets directly to the strategy's multisig (simulating external funding)
+        // This bypasses the vault's allocate function
+        asset.mint(destinationMultisig, assetsToFund);
+        emit log_named_address("Assets sent to multisig", destinationMultisig);
+        emit log_named_uint("Assets sent to multisig amount", assetsToFund);
+
+        // Step 5: Adjust strategy's totalAssets to reflect the multisig holdings
+        // This is how the strategy tracks assets held by the multisig
+        vm.startPrank(strategyAdmin);
+        destinationStrategy.pause();
+        destinationStrategy.unpauseAndAdjustTotalAssets(int256(assetsToFund));
         vm.stopPrank();
+
+        // Verify state BEFORE accrueYield
+        // cachedTotalAssets is 0, but convertToAssets previews strategy value via _previewYieldNoFees
+        uint256 oneShare = 10 ** destinationVault.decimals();
+        uint256 expectedAssets = (oneShare * 15) / 10; // 1.5e18 for 1e18 shares
+
+        emit log_string("=== BEFORE accrueYield ===");
+        assertEq(destinationVault.cachedTotalAssets(), 0, "Cached total assets should be 0 before accrueYield");
+
+        uint256 exchangeRateBefore = destinationVault.convertToAssets(oneShare);
+        emit log_named_uint("Exchange rate BEFORE accrueYield", exchangeRateBefore);
+        emit log_named_uint("cachedTotalAssets BEFORE", destinationVault.cachedTotalAssets());
+
+        // convertToAssets previews yield by querying strategy, so exchange rate is already 1.5
+        assertApproxEqAbs(
+            exchangeRateBefore, expectedAssets, 1, "Exchange rate should be ~1.5 BEFORE accrueYield (via preview)"
+        );
+
+        // Step 6: Accrue yield to update cachedTotalAssets based on strategy's reported value
+        vm.prank(allocator);
+        destinationVault.accrueYield();
+
+        // Verify state AFTER accrueYield
+        // Now cachedTotalAssets is updated, and there's no new yield to preview
+        emit log_string("=== AFTER accrueYield ===");
+        uint256 cachedAssetsAfter = destinationVault.cachedTotalAssets();
+        emit log_named_uint("cachedTotalAssets AFTER", cachedAssetsAfter);
+        assertEq(cachedAssetsAfter, assetsToFund, "Cached assets should be updated to funded amount");
+
+        uint256 exchangeRateAfter = destinationVault.convertToAssets(oneShare);
+        emit log_named_uint("Exchange rate AFTER accrueYield", exchangeRateAfter);
+
+        // Exchange rate should still be 1.5, but now comes from cachedTotalAssets (no new yield)
+        assertApproxEqAbs(
+            exchangeRateAfter, expectedAssets, 1, "Exchange rate should be ~1.5 AFTER accrueYield (from cache)"
+        );
+
+        // Verify total assets equals the strategy's reported amount
+        assertEq(destinationVault.totalAssets(), assetsToFund, "Total assets should equal funded amount");
+
+        // Verify cached assets was updated by accrueYield
+        uint256 cachedAssets = destinationVault.cachedTotalAssets();
+        assertEq(cachedAssets, assetsToFund, "Cached assets should equal funded amount after accrueYield");
+
+        // Verify no fees are counted (totalAssets should equal cachedTotalAssets)
+        assertEq(destinationVault.totalAssets(), cachedAssets, "No fees should be counted");
+
+        // Log the setup for clarity
+        emit log_named_uint("Shares minted", sharesToMint);
+        emit log_named_uint("Assets funded to multisig", assetsToFund);
+        emit log_string("--- Exchange Rate Verification ---");
+        emit log_named_uint("Before accrueYield", exchangeRateBefore);
+        emit log_named_uint("After accrueYield", exchangeRateAfter);
     }
 
     function _allocateAllToStrategy() internal {
@@ -280,6 +419,80 @@ contract LayerZeroClaimE2ETest is TestBaseSetup, TestHelperOz5 {
         assertEq(
             distributorSharesAfter, distributorSharesBefore - user1SharesBefore, "Distributor shares should decrease"
         );
+
+        // ============================================================================
+        // REDEMPTION FLOW: User1 redeems their shares on the destination vault
+        // ============================================================================
+
+        emit log_string("=== Starting Redemption Flow ===");
+
+        // Calculate expected assets to receive (1.5x exchange rate)
+        uint256 sharesToRedeem = user1DestSharesAfter;
+        uint256 expectedAssets = destinationVault.convertToAssets(sharesToRedeem);
+        emit log_named_uint("Shares to redeem", sharesToRedeem);
+        emit log_named_uint("Expected assets to receive", expectedAssets);
+
+        // Verify exchange rate before redemption
+        uint256 oneShare = 10 ** destinationVault.decimals();
+        uint256 exchangeRateBeforeRedeem = destinationVault.convertToAssets(oneShare);
+        emit log_named_uint("Exchange rate before redemption", exchangeRateBeforeRedeem);
+
+        // The multisig needs to approve the strategy to pull assets for withdrawal
+        // The MultisigStrategy pulls assets FROM multisig TO strategy when onWithdraw is called
+        uint256 assetsNeededForWithdrawal = expectedAssets;
+
+        // Multisig approves strategy to transfer assets (simulating multisig preparing for redemption)
+        vm.prank(destinationMultisig);
+        asset.approve(address(destinationStrategy), assetsNeededForWithdrawal);
+
+        emit log_named_uint("Multisig approved strategy for", assetsNeededForWithdrawal);
+
+        // Check if withdrawal queue is active (AsyncVault feature)
+        bool queueActive = destinationVault.isQueueActive();
+        emit log_named_string("Withdrawal queue active?", queueActive ? "YES" : "NO");
+
+        // If queue is active, disable it for immediate redemption
+        if (queueActive) {
+            vm.prank(vaultManager);
+            destinationVault.toggleQueueActive();
+            emit log_string("Withdrawal queue DISABLED for immediate redemption");
+        }
+
+        // User1 redeems all their shares
+        uint256 user1AssetsBefore = asset.balanceOf(user1);
+        emit log_named_uint("User1 asset balance BEFORE redemption", user1AssetsBefore);
+        emit log_named_uint("Multisig asset balance BEFORE redemption", asset.balanceOf(destinationMultisig));
+        emit log_named_uint("Strategy asset balance BEFORE redemption", asset.balanceOf(address(destinationStrategy)));
+
+        vm.prank(user1);
+        uint256 assetsReceived = destinationVault.redeem(sharesToRedeem, user1, user1);
+
+        uint256 user1AssetsAfter = asset.balanceOf(user1);
+
+        emit log_named_uint("Assets received from redemption (return value)", assetsReceived);
+        emit log_named_uint("User1 asset balance AFTER redemption", user1AssetsAfter);
+        emit log_named_uint("Multisig asset balance AFTER redemption", asset.balanceOf(destinationMultisig));
+        emit log_named_uint("Strategy asset balance AFTER redemption", asset.balanceOf(address(destinationStrategy)));
+        emit log_named_uint("Actual assets received by user1", user1AssetsAfter - user1AssetsBefore);
+
+        // Verify redemption results
+        assertEq(destinationVault.balanceOf(user1), 0, "User1 shares should be burned after redemption");
+        assertEq(user1AssetsAfter - user1AssetsBefore, assetsReceived, "User should receive the redeemed assets");
+        assertApproxEqAbs(
+            assetsReceived, expectedAssets, 1, "Assets received should match expected (within 1 wei rounding)"
+        );
+
+        // Verify exchange rate is maintained after redemption
+        uint256 exchangeRateAfterRedeem = destinationVault.convertToAssets(oneShare);
+        emit log_named_uint("Exchange rate after redemption", exchangeRateAfterRedeem);
+        assertApproxEqAbs(
+            exchangeRateAfterRedeem,
+            exchangeRateBeforeRedeem,
+            2,
+            "Exchange rate should remain constant after redemption"
+        );
+
+        emit log_string("=== Redemption Flow Completed Successfully ===");
     }
 
     function test_E2E_multipleUsersClaim() public {

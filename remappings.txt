@@ -3,3 +3,5 @@ forge-std/=lib/forge-std/src/
 halmos-cheatcodes/=lib/openzeppelin-contracts-upgradeable/lib/halmos-cheatcodes/src/
 @openzeppelin-upgradeable/=node_modules/@openzeppelin/contracts-upgradeable/
 @openzeppelin-contracts/=node_modules/@openzeppelin/contracts/
+@aave/core-v3/=node_modules/@aave/core-v3/
+@prb/math/=node_modules/@prb/math/

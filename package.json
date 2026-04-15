@@ -1,7 +1,7 @@
 {
-  "name": "@blueprint-finance/concrete-earn-v2-bug-bounty",
-  "version": "0.0.1",
-  "description": "Concrete Earn V2 Bug Bounty",
+  "name": "@concrete-xyz/earn-v2-core",
+  "version": "1.2.0",
+  "description": "Concrete Earn V2 Core",
   "author": "Blueprint Finance",
   "license": "AGPL-3.0",
   "engines": {
@@ -10,9 +10,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/blueprint-finance/concrete-earn-v2-bug-bounty"
+    "url": "https://github.com/blueprint-finance/earn-v2-core"
   },
   "dependencies": {
+    "@aave/core-v3": "^1.19.3",
     "@layerzerolabs/lz-evm-messagelib-v2": "^3.0.75",
     "@layerzerolabs/lz-evm-protocol-v2": "^3.0.139",
     "@layerzerolabs/lz-evm-v1-0.7": "^3.0.75",
@@ -20,7 +21,9 @@
     "@layerzerolabs/oapp-evm-upgradeable": "^0.1.2",
     "@layerzerolabs/test-devtools-evm-foundry": "^7.0.0",
     "@openzeppelin/contracts": "5.2.0",
-    "@openzeppelin/contracts-upgradeable": "5.2.0"
+    "@openzeppelin/contracts-upgradeable": "5.2.0",
+    "@prb/math": "^4.1.1",
+    "@uniswap/v3-periphery": "^1.4.4"
   },
   "devDependencies": {
     "solidity-bytes-utils": "^0.8.0"

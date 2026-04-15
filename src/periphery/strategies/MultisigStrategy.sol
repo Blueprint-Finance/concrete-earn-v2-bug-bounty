@@ -8,6 +8,7 @@ import {PositionAccountingStorageLib} from "../lib/PositionAccountingStorageLib.
 import {PositionAccountingLib} from "../lib/PositionAccountingLib.sol";
 import {PeripheryRolesLib} from "../lib/PeripheryRolesLib.sol";
 import {StrategyType} from "../../interface/IStrategyTemplate.sol";
+import {IAsyncAccounting} from "../../interface/IAsyncAccounting.sol";
 import {IERC20} from "@openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {IERC4626} from "@openzeppelin-contracts/interfaces/IERC4626.sol";
 import {SafeERC20} from "@openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
@@ -23,7 +24,7 @@ import {SignedMath} from "@openzeppelin-contracts/utils/math/SignedMath.sol";
  *      them on withdrawal. It does not generate any rewards.
  * @dev Uses EIP-7201 storage layout for upgradeability.
  */
-contract MultisigStrategy is BaseStrategy {
+contract MultisigStrategy is BaseStrategy, IAsyncAccounting {
     using SafeERC20 for IERC20;
     using Math for uint256;
     using SafeCast for int256;
@@ -68,6 +69,11 @@ contract MultisigStrategy is BaseStrategy {
         _;
     }
 
+    function ID() public pure virtual override(BaseStrategy) returns (uint64) {
+        // contractType=2 (strategy), flavour=2 (multisig-strategy), version=1.1.0 (major=1, minor=1, patch=0)
+        return uint64(200210100); // ContractIdEncoding.encode(2, 2, 1, 01, 00);
+    }
+
     /**
      * @dev Constructor that disables initializers
      */
@@ -92,6 +98,19 @@ contract MultisigStrategy is BaseStrategy {
         uint64 accountingValidityPeriod_,
         uint64 cooldownPeriod_
     ) external initializer {
+        __MultisigStrategy_init(
+            admin, vault_, multiSig_, maxAccountingChangeThreshold_, accountingValidityPeriod_, cooldownPeriod_
+        );
+    }
+
+    function __MultisigStrategy_init(
+        address admin,
+        address vault_,
+        address multiSig_,
+        uint64 maxAccountingChangeThreshold_,
+        uint64 accountingValidityPeriod_,
+        uint64 cooldownPeriod_
+    ) internal onlyInitializing {
         if (multiSig_ == address(0)) revert InvalidMultiSigAddress();
         if (cooldownPeriod_ >= accountingValidityPeriod_) {
             revert PositionAccountingLib.InvalidCooldownPeriod();
@@ -101,7 +120,7 @@ contract MultisigStrategy is BaseStrategy {
         }
 
         // Initialize BaseStrategy first
-        _initializeBaseStrategy(admin, vault_);
+        __BaseStrategy_init(admin, vault_);
 
         // Initialize MultisigStrategyStorage
         MultisigStrategyStorage.initialize(multiSig_);
@@ -264,6 +283,16 @@ contract MultisigStrategy is BaseStrategy {
         }
 
         // Adjust the total assets
+        _adjustTotalAssets(diff);
+    }
+
+    /**
+     * @notice Vault-initiated accounting adjustment (e.g. recording an unwind cost).
+     * @dev Callable only by the bound vault. Bypasses nonce / threshold / cooldown
+     *      checks because the vault is a trusted caller.
+     * @param diff Signed delta applied to the strategy's vaultDepositedAmount.
+     */
+    function adjustTotalAssets(int256 diff) external override onlyVault {
         _adjustTotalAssets(diff);
     }
 

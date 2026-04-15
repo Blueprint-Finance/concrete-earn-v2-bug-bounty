@@ -21,7 +21,7 @@ contract PerformanceFeeFuzzTest is ConcreteStandardVaultImplBaseSetup, AddStrate
         performanceFeeRecipient = makeAddr("performanceFeeRecipient");
 
         // Create and add strategy
-        strategy = new ERC4626StrategyMock(address(asset));
+        strategy = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
         addStrategyWithDeallocationOrder(address(strategy), address(concreteStandardVault), allocator, strategyOperator);
 
         // Make initial deposit
@@ -80,6 +80,7 @@ contract PerformanceFeeFuzzTest is ConcreteStandardVaultImplBaseSetup, AddStrate
         assertEq(concreteStandardVault.balanceOf(performanceFeeRecipient), 0);
 
         // Accrue yield and verify performance fee
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
         uint256 actualShares = concreteStandardVault.balanceOf(performanceFeeRecipient);
 

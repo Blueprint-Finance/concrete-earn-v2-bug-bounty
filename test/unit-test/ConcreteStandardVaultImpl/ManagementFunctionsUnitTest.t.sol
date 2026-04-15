@@ -5,11 +5,13 @@ import {
     IConcreteStandardVaultImpl,
     ConcreteStandardVaultImplBaseSetup
 } from "../../common/ConcreteStandardVaultImplBaseSetup.t.sol";
+import {ConcreteStandardVaultImpl} from "../../../src/implementation/ConcreteStandardVaultImpl.sol";
 import {ConcreteV2RolesLib as RolesLib} from "../../../src/lib/Roles.sol";
 import {IAccessControl} from "@openzeppelin-contracts/access/IAccessControl.sol";
 import {IUpgradeableVault} from "../../../src/interface/IUpgradeableVault.sol";
 
 import {ConcreteV2FeeParamsLib} from "../../../src/lib/Constants.sol";
+import {IContractId} from "../../../src/interface/IContractId.sol";
 
 contract ManagementFunctionsUnitTest is ConcreteStandardVaultImplBaseSetup {
     address public user1;
@@ -47,7 +49,7 @@ contract ManagementFunctionsUnitTest is ConcreteStandardVaultImplBaseSetup {
         vm.prank(vaultManager);
         concreteStandardVault.updateManagementFee(500); // 5%
 
-        (address recipient, uint16 fee, uint32 lastAccrual) = concreteStandardVault.managementFee();
+        (uint16 fee, address recipient, uint32 lastAccrual,,) = concreteStandardVault.getFeeConfig();
         assertEq(fee, 500);
         assertEq(recipient, feeRecipient);
         assertGt(lastAccrual, 0);
@@ -56,8 +58,7 @@ contract ManagementFunctionsUnitTest is ConcreteStandardVaultImplBaseSetup {
     function testUpdateManagementFeeZero() public {
         vm.prank(vaultManager);
         concreteStandardVault.updateManagementFee(0);
-
-        (, uint16 fee,) = concreteStandardVault.managementFee();
+        (uint16 fee,,,,) = concreteStandardVault.getFeeConfig();
         assertEq(fee, 0);
     }
 
@@ -67,12 +68,6 @@ contract ManagementFunctionsUnitTest is ConcreteStandardVaultImplBaseSetup {
         vm.expectRevert(IConcreteStandardVaultImpl.ManagementFeeExceedsMaximum.selector);
         vm.prank(vaultManager);
         concreteStandardVault.updateManagementFee(ConcreteV2FeeParamsLib.MAX_MANAGEMENT_FEE + 1);
-    }
-
-    function testUpdateManagementFeeNoRecipient() public {
-        vm.prank(vaultManager);
-        vm.expectRevert(IConcreteStandardVaultImpl.FeeRecipientNotSet.selector);
-        concreteStandardVault.updateManagementFee(500);
     }
 
     function testUpdateManagementFeeUnauthorized() public {
@@ -91,7 +86,7 @@ contract ManagementFunctionsUnitTest is ConcreteStandardVaultImplBaseSetup {
         vm.prank(factoryOwner);
         concreteStandardVault.updateManagementFeeRecipient(feeRecipient);
 
-        (address recipient,, uint32 lastAccrual) = concreteStandardVault.managementFee();
+        (, address recipient, uint32 lastAccrual,,) = concreteStandardVault.getFeeConfig();
         assertEq(recipient, feeRecipient);
         assertGt(lastAccrual, 0);
     }
@@ -117,7 +112,7 @@ contract ManagementFunctionsUnitTest is ConcreteStandardVaultImplBaseSetup {
         vm.prank(vaultManager);
         concreteStandardVault.updatePerformanceFee(300); // 3%
 
-        (address recipient, uint16 fee) = concreteStandardVault.performanceFee();
+        (,,, uint16 fee, address recipient) = concreteStandardVault.getFeeConfig();
         assertEq(fee, 300);
         assertEq(recipient, feeRecipient);
     }
@@ -126,7 +121,7 @@ contract ManagementFunctionsUnitTest is ConcreteStandardVaultImplBaseSetup {
         vm.prank(vaultManager);
         concreteStandardVault.updatePerformanceFee(0);
 
-        (, uint16 fee) = concreteStandardVault.performanceFee();
+        (,,, uint16 fee,) = concreteStandardVault.getFeeConfig();
         assertEq(fee, 0);
     }
 
@@ -136,12 +131,6 @@ contract ManagementFunctionsUnitTest is ConcreteStandardVaultImplBaseSetup {
         vm.expectRevert(IConcreteStandardVaultImpl.PerformanceFeeExceedsMaximum.selector);
         vm.prank(vaultManager);
         concreteStandardVault.updatePerformanceFee(ConcreteV2FeeParamsLib.MAX_PERFORMANCE_FEE + 1);
-    }
-
-    function testUpdatePerformanceFeeNoRecipient() public {
-        vm.prank(vaultManager);
-        vm.expectRevert(IConcreteStandardVaultImpl.FeeRecipientNotSet.selector);
-        concreteStandardVault.updatePerformanceFee(300);
     }
 
     function testUpdatePerformanceFeeUnauthorized() public {
@@ -159,8 +148,8 @@ contract ManagementFunctionsUnitTest is ConcreteStandardVaultImplBaseSetup {
         emit IConcreteStandardVaultImpl.PerformanceFeeRecipientUpdated(feeRecipient);
         vm.prank(factoryOwner);
         concreteStandardVault.updatePerformanceFeeRecipient(feeRecipient);
+        (,,,, address recipient) = concreteStandardVault.getFeeConfig();
 
-        (address recipient,) = concreteStandardVault.performanceFee();
         assertEq(recipient, feeRecipient);
     }
 
@@ -197,7 +186,7 @@ contract ManagementFunctionsUnitTest is ConcreteStandardVaultImplBaseSetup {
         concreteStandardVault.updateManagementFee(200);
 
         // Check that lastManagementFeeAccrual was updated
-        (,, uint32 lastAccrual) = concreteStandardVault.managementFee();
+        (,, uint32 lastAccrual,,) = concreteStandardVault.getFeeConfig();
         assertEq(lastAccrual, block.timestamp);
     }
 
@@ -249,5 +238,76 @@ contract ManagementFunctionsUnitTest is ConcreteStandardVaultImplBaseSetup {
         vm.prank(vaultManager);
         vm.expectRevert(IConcreteStandardVaultImpl.InvalidWithdrawLimits.selector);
         concreteStandardVault.setWithdrawLimits(1000000e18, 1000000e17);
+    }
+
+    // ============================================================================
+    // DEFAULT FEE RECIPIENTS TESTS
+    // ============================================================================
+
+    function testVaultHasDefaultFeeRecipientsFromFactory() public {
+        // Verify management fee recipient is set from factory's default config
+        (, address mgmtRecipient,,,) = concreteStandardVault.getFeeConfig();
+        assertEq(mgmtRecipient, defaultManagementFeeRecipient, "Management fee recipient should match factory default");
+
+        // Verify performance fee recipient is set from factory's default config
+        (,,,, address perfRecipient) = concreteStandardVault.getFeeConfig();
+        assertEq(
+            perfRecipient, defaultPerformanceFeeRecipient, "Performance fee recipient should match factory default"
+        );
+    }
+
+    function testDefaultFeeRecipientsAllowSettingFees() public {
+        // Since default fee recipients are set, we should be able to set fees without reverting
+        vm.prank(vaultManager);
+        concreteStandardVault.updateManagementFee(500); // 5%
+
+        (uint16 mgmtFee,,,,) = concreteStandardVault.getFeeConfig();
+        assertEq(mgmtFee, 500, "Management fee should be set");
+
+        vm.prank(vaultManager);
+        concreteStandardVault.updatePerformanceFee(1000); // 10%
+
+        (,,, uint16 perfFee,) = concreteStandardVault.getFeeConfig();
+        assertEq(perfFee, 1000, "Performance fee should be set");
+    }
+
+    function testFactoryOwnerCanUpdateDefaultRecipients() public {
+        address newMgmtRecipient = makeAddr("newMgmtRecipient");
+        address newPerfRecipient = makeAddr("newPerfRecipient");
+
+        // Update default recipients on factory
+        vm.prank(factoryOwner);
+        factory.setDefaultEnforcedVaultConfiguration(newMgmtRecipient, newPerfRecipient);
+
+        // Verify factory config was updated
+        (address defaultMgmt, address defaultPerf) = factory.getDefaultEnforcedVaultConfiguration();
+        assertEq(defaultMgmt, newMgmtRecipient, "Factory default management fee recipient should be updated");
+        assertEq(defaultPerf, newPerfRecipient, "Factory default performance fee recipient should be updated");
+    }
+
+    function testNewVaultGetsUpdatedDefaultRecipients() public {
+        address newMgmtRecipient = makeAddr("newMgmtRecipient");
+        address newPerfRecipient = makeAddr("newPerfRecipient");
+
+        // Update default recipients on factory
+        vm.prank(factoryOwner);
+        factory.setDefaultEnforcedVaultConfiguration(newMgmtRecipient, newPerfRecipient);
+
+        uint64 vaultImpl = uint64(IContractId(address(concreteStandardVaultImpl)).ID());
+
+        // Create a new vault - it should get the updated default recipients
+        ConcreteStandardVaultImpl newVault = ConcreteStandardVaultImpl(
+            factory.create(
+                vaultImpl,
+                vaultOwner,
+                abi.encode(address(allocateModule), address(asset), vaultManager, "New Vault", "NV")
+            )
+        );
+
+        (, address mgmtRecipient,,,) = newVault.getFeeConfig();
+        assertEq(mgmtRecipient, newMgmtRecipient, "New vault should have updated management fee recipient");
+
+        (,,,, address perfRecipient) = newVault.getFeeConfig();
+        assertEq(perfRecipient, newPerfRecipient, "New vault should have updated performance fee recipient");
     }
 }

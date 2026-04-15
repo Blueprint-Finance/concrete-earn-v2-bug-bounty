@@ -2,9 +2,12 @@
 pragma solidity ^0.8.24;
 
 import {ConcreteStandardVaultImplStorageLib as SVLib} from "./storage/ConcreteStandardVaultImplStorageLib.sol";
+import {ConcreteAsyncVaultImplStorageLib as AVLib} from "./storage/ConcreteAsyncVaultImplStorageLib.sol";
 import {EnumerableSet} from "@openzeppelin-contracts/utils/structs/EnumerableSet.sol";
 import {IConcreteStandardVaultImpl} from "../interface/IConcreteStandardVaultImpl.sol";
+import {IConcreteAsyncVaultImpl} from "../interface/IConcreteAsyncVaultImpl.sol";
 import {ConcreteV2FeeParamsLib} from "./Constants.sol";
+import {AsyncVaultHelperLib} from "./AsyncVaultHelperLib.sol";
 
 library StateSetterLib {
     using EnumerableSet for EnumerableSet.AddressSet;
@@ -58,24 +61,29 @@ library StateSetterLib {
         emit IConcreteStandardVaultImpl.PerformanceFeeRecipientUpdated(recipient);
     }
 
-    function setDepositLimits(uint256 minDepositAmount, uint256 maxDepositAmount) external {
-        require(maxDepositAmount >= minDepositAmount, IConcreteStandardVaultImpl.InvalidDepositLimits());
+    /**
+     * @dev Sets the deposit limits for the vault.
+     * @param minTxDepositAmount The minimum deposit amount per transaction.
+     * @param maxGlobalDepositAmount The maximum global deposit amount (applies to total assets across all users).
+     */
+    function setDepositLimits(uint256 minTxDepositAmount, uint256 maxGlobalDepositAmount) external {
+        require(maxGlobalDepositAmount >= minTxDepositAmount, IConcreteStandardVaultImpl.InvalidDepositLimits());
 
         SVLib.ConcreteStandardVaultImplStorage storage $ = SVLib.fetch();
 
-        $.maxDepositAmount = maxDepositAmount;
-        $.minDepositAmount = minDepositAmount;
-        emit IConcreteStandardVaultImpl.DepositLimitsUpdated(maxDepositAmount, minDepositAmount);
+        $.maxGlobalDepositAmount = maxGlobalDepositAmount;
+        $.minTxDepositAmount = minTxDepositAmount;
+        emit IConcreteStandardVaultImpl.DepositLimitsUpdated(maxGlobalDepositAmount, minTxDepositAmount);
     }
 
-    function setWithdrawLimits(uint256 minWithdrawAmount, uint256 maxWithdrawAmount) external {
-        require(maxWithdrawAmount >= minWithdrawAmount, IConcreteStandardVaultImpl.InvalidWithdrawLimits());
+    function setWithdrawLimits(uint256 minTxWithdrawAmount, uint256 maxTxWithdrawAmount) external {
+        require(maxTxWithdrawAmount >= minTxWithdrawAmount, IConcreteStandardVaultImpl.InvalidWithdrawLimits());
 
         SVLib.ConcreteStandardVaultImplStorage storage $ = SVLib.fetch();
 
-        $.maxWithdrawAmount = maxWithdrawAmount;
-        $.minWithdrawAmount = minWithdrawAmount;
-        emit IConcreteStandardVaultImpl.WithdrawLimitsUpdated(maxWithdrawAmount, minWithdrawAmount);
+        $.maxTxWithdrawAmount = maxTxWithdrawAmount;
+        $.minTxWithdrawAmount = minTxWithdrawAmount;
+        emit IConcreteStandardVaultImpl.WithdrawLimitsUpdated(maxTxWithdrawAmount, minTxWithdrawAmount);
     }
 
     function addStrategy(address strategy) external {
@@ -102,8 +110,35 @@ library StateSetterLib {
         require($.strategies.remove(strategy), IConcreteStandardVaultImpl.StrategyDoesNotExist());
 
         delete $.strategyData[strategy];
+        _removeStrategyFromDeallocationOrder(strategy);
 
         emit IConcreteStandardVaultImpl.StrategyRemoved(strategy);
+    }
+
+    /**
+     * @dev Removes all instances of a strategy from the deallocation order array.
+     *      Preserves the relative order of remaining strategies.
+     *      Handles duplicated entries (e.g. from setDeallocationOrder with duplicates).
+     * @param strategy The strategy address to remove from deallocation order.
+     */
+    function _removeStrategyFromDeallocationOrder(address strategy) internal {
+        SVLib.ConcreteStandardVaultImplStorage storage $ = SVLib.fetch();
+
+        address[] storage deallocationOrder = $.deallocationOrder;
+        uint256 i;
+        while (i < deallocationOrder.length) {
+            if (deallocationOrder[i] == strategy) {
+                // Shift elements to preserve relative order of remaining strategies
+                for (uint256 j = i; j < deallocationOrder.length - 1; ++j) {
+                    deallocationOrder[j] = deallocationOrder[j + 1];
+                }
+                deallocationOrder.pop();
+                emit IConcreteStandardVaultImpl.DeallocationOrderUpdated();
+                // Do not increment i - next element is now at position i
+            } else {
+                ++i;
+            }
+        }
     }
 
     function toggleStrategyStatus(address strategy) external {
@@ -156,10 +191,21 @@ library StateSetterLib {
                 $.strategyData[strategy].status == IConcreteStandardVaultImpl.StrategyStatus.Active,
                 IConcreteStandardVaultImpl.StrategyIsHalted()
             );
-
-            $.deallocationOrder.push(strategy);
         }
 
+        $.deallocationOrder = order;
+
         emit IConcreteStandardVaultImpl.DeallocationOrderUpdated();
+    }
+
+    /**
+     * @notice Set the unwind cost cap for priority withdrawals
+     * @dev Validates that the unwind cost cap does not exceed BASIS_POINTS
+     * @param unwindCostCap_ The new unwind cost cap in basis points (10000 = 100%)
+     */
+    function setUnwindCostCap(uint16 unwindCostCap_) external {
+        require(unwindCostCap_ <= AsyncVaultHelperLib.BASIS_POINTS, IConcreteAsyncVaultImpl.InvalidUnwindCostCap());
+        AVLib.ConcreteAsyncVaultImplStorage storage $ = AVLib.fetch();
+        $.unwindCostCapBP = unwindCostCap_;
     }
 }

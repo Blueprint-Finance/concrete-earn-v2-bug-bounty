@@ -20,6 +20,8 @@ library ConcreteAsyncVaultImplStorageLib {
         mapping(uint256 => uint256) epochPricePerSharePlusOne;
         // Whether the queue is active
         bool isQueueActive;
+        // Unwind cost cap for priority withdrawals in basis points (10000 = 100%)
+        uint16 unwindCostCapBP;
     }
 
     /**

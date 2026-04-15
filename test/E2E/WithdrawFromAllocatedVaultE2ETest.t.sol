@@ -30,9 +30,9 @@ contract WithdrawFromAllocatedVaultE2ETest is ConcreteStandardVaultImplBaseSetup
         user3 = makeAddr("user3");
 
         // Deploy strategies
-        strategy1 = new ERC4626StrategyMock(address(asset));
-        strategy2 = new ERC4626StrategyMock(address(asset));
-        strategy3 = new ERC4626StrategyMock(address(asset));
+        strategy1 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
+        strategy2 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
+        strategy3 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
 
         vm.label(address(strategy1), "strategy1");
         vm.label(address(strategy2), "strategy2");

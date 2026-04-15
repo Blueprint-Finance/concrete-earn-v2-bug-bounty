@@ -45,38 +45,86 @@ The factory is an upgradeable contract that has the following three major functi
 
 ### 1.1. Vault Deployment
 
-The deployment of vaults works as follows. The deployer can choose from one of several implementations. Implementations are vault contracts of a certain flavor and with certain unique features, that have been registered in the factory and are indexed in a sequential manner. The deployment of a vault is done via the function 
+The deployment of vaults works as follows. The deployer can choose from one of several implementations. Implementations are vault contracts of a certain flavor and with certain unique features, that have been registered in the factory. The deployment of a vault is done via the function 
 ```js
-function create(uint64 version, address ownerAddr, bytes calldata data, bytes32 salt) public returns (address)
+function create(uint64 vaultImpl, address ownerAddr, bytes calldata data, bytes32 salt) public returns (address)
 ```
-It is a permissionless function with four arguments. The `version` is the implementation index, the `ownerAddr` is the admin of the vault (see [Section 2.5](#25-access-control-and-vault-operations)), the `data` carries some initialization data and the `salt` allows to create predictable deterministic vault addresses. Upon deployment an ERC-1976 proxy is created that points to the logic of the registered implementations. Upon successful deployment the following event will be emitted:
+It is a permissionless function with four arguments. The `vaultImpl` is the unique identifier of the implementation (see [Section 1.1.1](#111-vault-id-and-versioning-system) for details), the `ownerAddr` is the admin of the vault (see [Section 2.5](#25-access-control-and-vault-operations)), the `data` carries some initialization data and the `salt` allows to create predictable deterministic vault addresses. Upon deployment an ERC-1976 proxy is created that points to the logic of the registered implementations. Upon successful deployment the following event will be emitted:
 ```js
-event Deployed(address indexed vault, uint64 indexed version, address indexed owner); 
+event Deployed(address indexed vault, uint64 indexed vaultImpl, address indexed owner); 
 ``` 
-If there is no such version or the version has been blocked, then the call will revert. A useful function for curators to predict their vault addresses is:
+If there is no such vault ID or the vault ID has been blocked, then the call will revert. A useful function for curators to predict their vault addresses is:
 ```js 
-function predictVaultAddress(uint64 version, address ownerAddr, bytes calldata data, bytes32 salt)
+function predictVaultAddress(uint64 vaultImpl, address ownerAddr, bytes calldata data, bytes32 salt)
 ```
+
+#### 1.1.1. Vault ID and Versioning System
+
+Concrete V2 uses a dual versioning system that decouples contract identification from OpenZeppelin's Initializable versioning:
+
+**Vault IDs (Contract IDs):**
+- **Source of Truth**: Vault implementations define their own unique `vaultImpl` through a hardcoded `ID()` function (a virtual pure function that can be overridden by inheriting contracts)
+- **Queryable**: Vault IDs can be queried directly from implementations via `IContractId(implementation).ID()`
+- **Consistent Across Chains**: The same implementation will have the same vault ID across all execution environments/chains
+- **Semantic Separation**: Vault IDs are semantically distinct from OpenZeppelin's Initializable versioning system
+- **No Strict Increment Requirement**: Unlike the legacy system, vault IDs do not need to be strictly incremental
+
+**OpenZeppelin Initializable Versioning:**
+- **Separate System**: Uses OpenZeppelin's `Initializable._initialized` storage variable to track upgrade iterations
+- **Upgrade Tracking**: Each upgrade increments the initialized version independently of vault IDs
+- **Decoupled**: This versioning is now decoupled from vault IDs, allowing for more flexible upgrade paths
+
+**Factory Registry:**
+- **Registry Role**: The factory acts as a registry that maps vault IDs to implementations via `mapping(uint64 => address) vaultImplToImplementation`
+- **Not Source of Truth**: The factory is no longer the source of truth for vault IDs, but maintains the registry of approved implementations
+- **Backward Compatibility**: The factory maintains backward compatibility with legacy sequential versioning (versions 1, 2, 3...) for existing deployments
+
+**Benefits:**
+- **Queryability**: Vault IDs can be queried from implementations without factory interaction
+- **Cross-Chain Consistency**: Same implementation = same ID across all chains
+- **Semantic Clarity**: Clear separation between contract identity (vault ID) and upgrade iteration (OZ version)
+- **Flexibility**: No requirement for strictly incremental IDs, enabling more meaningful ID encoding schemes
+
+**Legacy Support:**
+- The factory continues to support legacy sequential versioning where vault IDs were ascending indices (1, 2, 3...) that were identical to the Initializable versioning
+- Legacy implementations can still be queried via `getImplementationByVersion(uint64 version)`
+- The factory automatically handles both new ID-based lookups and legacy version-based lookups
 
 ### 1.2. Implementation and Vault Registry
 
 New implementations can be approved or blocked via the following two functions
 ```js
 function approveImplementation(address implementation) external onlyOwner;
-function blockImplementation(uint64 version) external onlyOwner;
+function blockImplementation(uint64 vaultImpl) external onlyOwner;
 ```
 They will respectively emit the following events:
 ```js
 event ApprovedImplementation(address indexed implementation);
-event Blocked(uint64 indexed version);
+event NewVaultImplToImplementation(uint64 indexed vaultImpl, address indexed implementation);
+event Blocked(uint64 indexed vaultImpl);
 ```
-Only approved implementations can be deployed. A new approval automatically receives the latest version plus one, which can be queried via 
+When approving an implementation, the factory:
+1. Queries the implementation's vault ID via `IContractId(implementation).ID()`
+2. Registers the mapping from vault ID to implementation address
+3. Emits both `ApprovedImplementation` (for backward compatibility) and `NewVaultImplToImplementation` events
+
+Only approved implementations can be deployed. The factory maintains a registry mapping vault IDs to implementations:
+```js
+mapping(uint64 => address) vaultImplToImplementation
+```
+
+**Querying Implementations:**
+- **Primary Method** (ID-based): Query by vault ID:
 ```js 
-function lastVersion() public view returns (uint64)
+function getImplementationByVaultImpl(uint64 vaultImpl) public view returns (address)
 ```
-One may also query the implementation registry via:
+- **Legacy Method** (version-based): For backward compatibility with legacy sequential versions:
 ```js 
 function getImplementationByVersion(uint64 version) public view checkVersion(version) returns (address)
+```
+- **Legacy Version Tracking**: The factory still maintains `lastVersion()` for legacy implementations that use sequential versioning:
+```js 
+function lastVersion() public view returns (uint64)
 ``` 
 
 Regarding the vault registry, it is simply a mapping `mapping(address => bool) vaults;`. There are two ways how vaults can be registered. 
@@ -95,22 +143,43 @@ function isRegisteredVault(address vault) public view returns (bool)
 
 ### 1.3. Upgrade Vaults
 
-Deployed vaults may be upgraded. Upgrading means that the implementation of the proxy is changed and re-initialized. However not any implementation can be chosen for the upgrade. The implementation must be approved, non-blocked and migrateable. Migratability is a feature that can be set for any pair of implementations with the constraint that the target has a higher version number.
+Deployed vaults may be upgraded. Upgrading means that the implementation of the proxy is changed and re-initialized. However not any implementation can be chosen for the upgrade. The implementation must be approved, non-blocked and migrateable. 
+
+**Migratability:**
+Migratability is a feature that can be set for any pair of implementations. For legacy versions, the constraint that the target has a higher version number is enforced. For new ID-based implementations, migratability can be set more flexibly.
 ```js 
-function setMigratable(uint64 fromVersion, uint64 toVersion) external onlyOwner
+function setMigratable(uint64 fromVaultImpl, uint64 toVaultImpl) external onlyOwner
 ```
 One may query the migratability:
 ```js 
-function isMigratable(uint64 fromVersion, uint64 toVersion)
+function isMigratable(uint64 fromVaultImpl, uint64 toVaultImpl) public view returns (bool)
 ```
 
-In order to upgrade a particular vault to a new version `version` the vault admin has to call 
+**Upgrade Process:**
+In order to upgrade a particular vault to a new vault ID, the vault admin has to call:
 ```js
-function upgrade(address vault, uint64 newVersion, bytes calldata data) external
+function upgrade(address vault, uint64 newVaultImpl, bytes calldata data) external
 ```
-on the factory. The calldata `data` is passed into the vault's upgrade function `abi.encodeCall(IUpgradeableVault.upgrade, (version, data))` (for reference see [Vault Interface 2.3](#23-yield-accrual)). A successful upgrade requires the abovementioned guards on the approval, blockage and migratability of source and target implementation to be passed. It then emits the following event:
+on the factory. The factory will:
+1. Determine the current vault ID of the vault being upgraded
+2. Validate that the upgrade is allowed (approved, non-blocked, and migratable)
+3. Call the vault's upgrade function with both the old and new vault IDs
+
+**Vault Upgrade Function:**
+The vault's upgrade function signature has been updated to accept both the old and new vault IDs:
 ```js
-event Migrated(address indexed vault, uint64 newVersion);
+function upgrade(uint64 oldVaultImpl, uint64 newVaultImpl, bytes calldata data) external
+```
+This change was necessary because at the time of upgrade, the old vault ID is no longer stored in the vault's state (it's only tracked via OpenZeppelin's Initializable versioning). By passing the old vault ID as an argument, the vault can properly validate and handle the upgrade without needing to cache the previous ID in storage.
+
+For legacy implementations that use the old two-argument signature, the factory automatically handles the conversion:
+```js
+function upgrade(uint64 newVaultImpl, bytes calldata data) external  // Legacy signature
+```
+
+A successful upgrade requires the abovementioned guards on the approval, blockage and migratability of source and target implementation to be passed. It then emits the following event:
+```js
+event Migrated(address indexed vault, uint64 newVaultImpl);
 ```
 
 

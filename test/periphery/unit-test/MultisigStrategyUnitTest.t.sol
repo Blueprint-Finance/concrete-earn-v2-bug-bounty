@@ -69,9 +69,47 @@ contract MultisigStrategyUnitTest is Test {
     function testConstructor() public view {
         assertEq(strategy.asset(), address(asset));
         assertTrue(strategy.hasRole(PeripheryRolesLib.STRATEGY_ADMIN, admin));
+        assertTrue(strategy.hasRole(PeripheryRolesLib.ROLE_ADMIN, admin));
+        assertTrue(strategy.hasRole(PeripheryRolesLib.PAUSER, admin));
         assertEq(strategy.getVault(), address(vault));
         assertEq(uint8(strategy.strategyType()), uint8(StrategyType.ASYNC));
         assertEq(strategy.maxAllocation(), type(uint256).max);
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.STRATEGY_ADMIN), 1);
+        assertEq(strategy.getRoleMember(PeripheryRolesLib.STRATEGY_ADMIN, 0), admin);
+    }
+
+    function testRoleAdminCanGrantRoles() public {
+        address newOperator = makeAddr("newOperator");
+        address newAdmin = makeAddr("newAdmin");
+
+        // Admin has ROLE_ADMIN, so can grant OPERATOR_ROLE
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator);
+        assertTrue(strategy.hasRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator));
+
+        // Admin can grant STRATEGY_ADMIN
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.STRATEGY_ADMIN, newAdmin);
+        assertTrue(strategy.hasRole(PeripheryRolesLib.STRATEGY_ADMIN, newAdmin));
+
+        // Admin can grant PAUSER
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.PAUSER, newAdmin);
+        assertTrue(strategy.hasRole(PeripheryRolesLib.PAUSER, newAdmin));
+    }
+
+    function testRoleAdminCanRevokeRoles() public {
+        address newOperator = makeAddr("newOperator");
+
+        // Grant role first
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator);
+        assertTrue(strategy.hasRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator));
+
+        // Revoke role using ROLE_ADMIN
+        vm.prank(admin);
+        strategy.revokeRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator);
+        assertFalse(strategy.hasRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator));
     }
 
     function testInitializeRevertIfInvalidMultiSigAddress() public {
@@ -131,6 +169,10 @@ contract MultisigStrategyUnitTest is Test {
     }
 
     function testPauseUnpause() public {
+        // Grant PAUSER role to admin
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.PAUSER, admin);
+
         vm.prank(admin);
         strategy.pause();
 
@@ -360,5 +402,22 @@ contract MultisigStrategyUnitTest is Test {
 
         // Verify assets were transferred to vault
         assertEq(asset.balanceOf(address(vault)), amount);
+    }
+
+    function testStrategyAccessControl() public {
+        address newAdmin = address(0x9999);
+        vm.startPrank(admin);
+        // add new role admin and check the admin roles
+        strategy.grantRole(PeripheryRolesLib.ROLE_ADMIN, newAdmin);
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.ROLE_ADMIN), 2);
+        assertEq(strategy.getRoleMember(PeripheryRolesLib.ROLE_ADMIN, 1), newAdmin);
+        vm.stopPrank();
+        // new role admin can grant strategy admin and operator roles
+        vm.startPrank(newAdmin);
+        strategy.grantRole(PeripheryRolesLib.STRATEGY_ADMIN, newAdmin);
+        strategy.grantRole(PeripheryRolesLib.OPERATOR_ROLE, newAdmin);
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.STRATEGY_ADMIN), 2);
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.OPERATOR_ROLE), 2);
+        vm.stopPrank();
     }
 }

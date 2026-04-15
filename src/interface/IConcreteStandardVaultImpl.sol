@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {IUpgradeableVault} from "./IUpgradeableVault.sol";
+import {IHurdleRateOracle} from "./IHurdleRateOracle.sol";
 import {Hooks} from "./IHook.sol";
 import {IERC4626} from "@openzeppelin-contracts/interfaces/IERC4626.sol";
 import {IAccessControlEnumerable} from "@openzeppelin-contracts/access/extensions/IAccessControlEnumerable.sol";
@@ -23,6 +24,11 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
      * @dev Thrown when attempting to add a strategy that uses a different asset than the vault.
      */
     error InvalidStrategyAsset();
+
+    /**
+     * @dev Thrown when attempting to add a strategy that is bound to a different vault.
+     */
+    error InvalidStrategyVault();
 
     /**
      * @dev Thrown when attempting to add a strategy that has already been added to the vault.
@@ -105,19 +111,35 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
     error InvalidWithdrawLimits();
 
     /**
-     * @dev Thrown when the asset amount is out of bounds.
+     *
+     *
+     **
+     * @dev Thrown when the minimum deposit amount per transaction is not met.
      */
-    error AssetAmountOutOfBounds(address sender, uint256 assets, uint256 minDepositAmount, uint256 maxDepositAmount);
+    error MinimumDepositAmountNotMet(address sender, uint256 assets, uint256 minTxDepositAmount);
+
+    /**
+     * @dev Thrown when the minimum withdraw amount per transaction is not met.
+     */
+    error MinimumWithdrawAmountNotMet(address sender, uint256 assets, uint256 minTxWithdrawAmount);
 
     /**
      * @dev Thrown when attempting to remove a strategy that has allocation or is in the deallocation order.
      */
     error StrategyHasAllocation();
+    error StaleDeallocationOrder(address strategy);
 
     /**
      * @dev Thrown when the vault has insufficient balance to process the epoch.
      */
     error InsufficientBalance();
+
+    /**
+     * @dev Thrown when there are insufficient withdrawable assets available across all strategies.
+     * @param requested The amount of assets requested for withdrawal.
+     * @param available The total amount of assets available for withdrawal (idle + withdrawable from strategies).
+     */
+    error InsufficientWithdrawableAssets(uint256 requested, uint256 available);
 
     /**
      * @dev Thrown when calculated shares are zero.
@@ -202,18 +224,24 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
     event PerformanceFeeRecipientUpdated(address performanceFeeRecipient);
 
     /**
-     * @dev Emitted when deposit limits are updated.
-     * @param maxDepositAmount The new maximum deposit amount.
-     * @param minDepositAmount The new minimum deposit amount.
+     * @dev Emitted when the hurdle rate oracle is updated.
+     * @param oracle The new hurdle rate oracle address (address(0) disables hurdle gating).
      */
-    event DepositLimitsUpdated(uint256 maxDepositAmount, uint256 minDepositAmount);
+    event HurdleRateOracleUpdated(address indexed oracle);
+
+    /**
+     * @dev Emitted when deposit limits are updated.
+     * @param maxGlobalDepositAmount The new maximum global deposit amount (applies to total assets across all users).
+     * @param minTxDepositAmount The new minimum deposit amount per transaction.
+     */
+    event DepositLimitsUpdated(uint256 maxGlobalDepositAmount, uint256 minTxDepositAmount);
 
     /**
      * @dev Emitted when withdraw limits are updated.
-     * @param maxWithdrawAmount The new maximum withdraw amount.
-     * @param minWithdrawAmount The new minimum withdraw amount.
+     * @param maxTxWithdrawAmount The new maximum withdraw amount per transaction.
+     * @param minTxWithdrawAmount The new minimum withdraw amount per transaction.
      */
-    event WithdrawLimitsUpdated(uint256 maxWithdrawAmount, uint256 minWithdrawAmount);
+    event WithdrawLimitsUpdated(uint256 maxTxWithdrawAmount, uint256 minTxWithdrawAmount);
 
     /**
      * @dev Emitted when the deallocation order is updated.
@@ -406,6 +434,12 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
     function setHooks(Hooks memory hooks) external;
 
     /**
+     * @notice Returns the current hooks configuration for the vault.
+     * @return The Hooks struct containing the target address and flags.
+     */
+    function getHooks() external view returns (Hooks memory);
+
+    /**
      * @notice Previews the total assets that would be available after accruing yield from all strategies.
      * @dev This function simulates the yield accrual operation without actually executing it,
      *      providing a view of what the vault's total assets would be after accounting
@@ -456,52 +490,34 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
     function allocateModule() external view returns (address);
 
     /**
-     * @dev Returns the management fee configuration.
-     * @return managementFeeRecipient The address that receives management fees.
-     * @return managementFeeRate The management fee rate in basis points (where 10,000 = 100%).
-     * @return lastAccrualTime The timestamp of the last management fee accrual.
-     */
-    function managementFee()
-        external
-        view
-        returns (address managementFeeRecipient, uint16 managementFeeRate, uint32 lastAccrualTime);
-
-    /**
      * @dev Sets the deposit limits.
-     * @param maxDepositAmount The maximum deposit amount.
-     * @param minDepositAmount The minimum deposit amount.
+     * @param minTxDepositAmount The minimum deposit amount for a single transaction.
+     * @param maxGlobalDepositAmount The maximum global deposit amount (applies to total assets across all users).
      * @dev Only callable by accounts with VAULT_MANAGER role.
      */
-    function setDepositLimits(uint256 maxDepositAmount, uint256 minDepositAmount) external;
+    function setDepositLimits(uint256 minTxDepositAmount, uint256 maxGlobalDepositAmount) external;
 
     /**
      * @dev Sets the withdraw limits.
-     * @param maxWithdrawAmount The maximum withdraw amount.
-     * @param minWithdrawAmount The minimum withdraw amount.
+     * @param minTxWithdrawAmount The minimum withdraw amount for a single transaction.
+     * @param maxTxWithdrawAmount The maximum withdraw amount for a single transaction.
      * @dev Only callable by accounts with VAULT_MANAGER role.
      */
-    function setWithdrawLimits(uint256 maxWithdrawAmount, uint256 minWithdrawAmount) external;
+    function setWithdrawLimits(uint256 minTxWithdrawAmount, uint256 maxTxWithdrawAmount) external;
 
     /**
      * @dev Returns the deposit limits.
-     * @return maxDepositAmount The maximum deposit amount.
-     * @return minDepositAmount The minimum deposit amount.
+     * @return maxGlobalDepositAmount The maximum deposit amount for the vault.
+     * @return minTxDepositAmount The minimum deposit amount for a single transaction.
      */
-    function getDepositLimits() external view returns (uint256 maxDepositAmount, uint256 minDepositAmount);
+    function getDepositLimits() external view returns (uint256 maxGlobalDepositAmount, uint256 minTxDepositAmount);
 
     /**
      * @dev Returns the withdraw limits.
-     * @return maxWithdrawAmount The maximum withdraw amount.
-     * @return minWithdrawAmount The minimum withdraw amount.
+     * @return maxTxWithdrawAmount The maximum withdraw amount for a single transaction.
+     * @return minTxWithdrawAmount The minimum withdraw amount for a single transaction.
      */
-    function getWithdrawLimits() external view returns (uint256 maxWithdrawAmount, uint256 minWithdrawAmount);
-
-    /**
-     * @dev Returns the performance fee configuration.
-     * @return performanceFeeRecipient The address that receives performance fees.
-     * @return performanceFeeRate The performance fee rate in basis points (where 10,000 = 100%).
-     */
-    function performanceFee() external view returns (address performanceFeeRecipient, uint16 performanceFeeRate);
+    function getWithdrawLimits() external view returns (uint256 maxTxWithdrawAmount, uint256 minTxWithdrawAmount);
 
     /**
      * @dev Returns the total amount of assets allocated to all strategies.
@@ -530,4 +546,20 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
      * @param order An array of strategy addresses in the order they should be deallocated.
      */
     function setDeallocationOrder(address[] calldata order) external;
+
+    /**
+     * @notice Sets the hurdle rate oracle for the vault.
+     * @dev When set to a non-zero address, performance fees are only charged on
+     *      yield exceeding the oracle's reported exchange rate. Set to address(0)
+     *      to disable hurdle gating and revert to flat performance fees.
+     * @dev Only callable by accounts with VAULT_MANAGER role.
+     * @param oracle The address of the hurdle rate oracle contract.
+     */
+    function setHurdleRateOracle(IHurdleRateOracle oracle) external;
+
+    /**
+     * @notice Returns the current hurdle rate oracle address.
+     * @return The hurdle rate oracle, or address(0) if not set.
+     */
+    function getHurdleRateOracle() external view returns (IHurdleRateOracle);
 }

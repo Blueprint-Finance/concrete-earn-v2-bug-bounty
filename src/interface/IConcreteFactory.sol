@@ -16,14 +16,17 @@ interface IConcreteFactory {
     error ZeroAddress();
     error InvalidVaultAddress();
     error InvalidDataLength();
+    error ProxyBytecodeNotInitialized();
+    error ImplementationNotFound();
+    error ZeroVaultImplId();
 
     /**
      * @notice Emitted when a new vault is deployed.
      * @param vault address of the new vault
-     * @param version version of the new vault
+     * @param vaultImpl vault ID of the new vault
      * @param owner address of the owner of the new vault
      */
-    event Deployed(address indexed vault, uint64 indexed version, address indexed owner);
+    event Deployed(address indexed vault, uint64 indexed vaultImpl, address indexed owner);
 
     /**
      * @notice Emitted when a new implementation is approved.
@@ -32,30 +35,46 @@ interface IConcreteFactory {
     event ApprovedImplementation(address indexed implementation);
 
     /**
+     * @notice Emitted when a new vault ID is approved.
+     * @param vaultImpl ID of the new vault
+     * @param implementation address of the new implementation
+     */
+    event NewVaultImplToImplementation(uint64 indexed vaultImpl, address indexed implementation);
+
+    /**
      * @notice Emitted when an implementation is blocked.
-     * @param version version of the implementation that was blocked
+     * @param vaultImpl vault ID of the implementation that was blocked
      */
-    event Blocked(uint64 indexed version);
+    event Blocked(uint64 indexed vaultImpl);
 
     /**
-     * @notice Emitted when a version is set as migratable to another version.
-     * @param fromVersion version that was set as migratable
-     * @param toVersion version that was set as migratable
+     * @notice Emitted when a vault ID is set as migratable to another vault ID.
+     * @param fromVaultImpl vault ID that was set as migratable
+     * @param toVaultImpl vault ID that was set as migratable
      */
-    event Migratable(uint64 indexed fromVersion, uint64 indexed toVersion);
+    event Migratable(uint64 indexed fromVaultImpl, uint64 indexed toVaultImpl);
 
     /**
-     * @notice Emitted when an vault is migrated to a new version.
+     * @notice Emitted when an vault is migrated to a new vault ID.
      * @param vault address of the vault
-     * @param newVersion new version of the vault
+     * @param newVaultImpl new vault ID of the vault
      */
-    event Migrated(address indexed vault, uint64 newVersion);
+    event Migrated(address indexed vault, uint64 newVaultImpl);
 
     /**
      * @notice Emitted when a vault is registered with the factory.
      * @param vault address of the vault that was registered
      */
     event VaultRegistered(address indexed vault);
+
+    /**
+     * @notice Emitted when the default configuration is updated.
+     * @param managementFeeRecipient new default management fee recipient
+     * @param performanceFeeRecipient new default performance fee recipient
+     */
+    event DefaultEnforcedVaultConfigurationUpdated(
+        address indexed managementFeeRecipient, address indexed performanceFeeRecipient
+    );
 
     /**
      * @notice Approve a new implementation for using to deploy a proxy.
@@ -65,76 +84,96 @@ interface IConcreteFactory {
 
     /**
      * @notice Block an implementation.
-     * @param version version of the implementation to block
+     * @param vaultImpl vault ID of the implementation to block
      */
-    function blockImplementation(uint64 version) external;
+    function blockImplementation(uint64 vaultImpl) external;
 
     /**
-     * @notice Set a version as migratable to another version.
-     * @param fromVersion version to set as migratable
-     * @param toVersion version to set as migratable
+     * @notice Block an implementation by its address.
+     * @param implementation address of the implementation to block
+     * @dev This is a convenience function that finds the version internally.
+     *      Reverts if the implementation is not found.
      */
-    function setMigratable(uint64 fromVersion, uint64 toVersion) external;
+    function blockImplementationByAddress(address implementation) external;
+
+    /**
+     * @notice Set a vault ID as migratable to another vault ID.
+     * @param fromVaultImpl vault ID to set as migratable
+     * @param toVaultImpl vault ID to set as migratable
+     */
+    function setMigratable(uint64 fromVaultImpl, uint64 toVaultImpl) external;
+
+    /**
+     * @notice Set migration path by implementation addresses.
+     * @param fromImplementation address of the source implementation
+     * @param toImplementation address of the target implementation
+     * @dev This is a convenience function that finds the versions internally.
+     *      Reverts if either implementation is not found.
+     */
+    function setMigratableByAddress(address fromImplementation, address toImplementation) external;
 
     /**
      * @notice Deploy a new proxy vault.
-     * @param version vault's version to use
+     * @param vaultImpl vault's ID to use
      * @param owner initial owner of the vault
      * @param data initial data for the vault creation
      * @return address of the vault
      * @dev CREATE2 salt is constructed from the given parameters.
      */
-    function create(uint64 version, address owner, bytes calldata data) external returns (address);
+    function create(uint64 vaultImpl, address owner, bytes calldata data) external returns (address);
 
     /**
      * @notice Deploy a new proxy vault.
-     * @param version vault's version to use
+     * @param vaultImpl vault's ID to use
      * @param owner initial owner of the vault
      * @param data initial data for the vault creation
      * @return address of the vault
      * @dev CREATE2 salt is constructed from the given parameters.
      */
-    function create(uint64 version, address owner, bytes calldata data, bytes32 salt) external returns (address);
+    function create(uint64 vaultImpl, address owner, bytes calldata data, bytes32 salt) external returns (address);
 
     /**
      * @notice Predict the address of a vault that would be deployed with the given parameters.
-     * @param version vault's version to use
+     * @param vaultImpl vault's ID to use
      * @param ownerAddr initial owner of the vault
      * @param data initial data for the vault creation
      * @return predicted address of the vault
      */
-    function predictVaultAddress(uint64 version, address ownerAddr, bytes calldata data) external view returns (address);
-
-    /**
-     * @notice Predict the address of a vault that would be deployed with the given parameters.
-     * @param version vault's version to use
-     * @param ownerAddr initial owner of the vault
-     * @param data initial data for the vault creation
-     * @param salt for CREATE2 deployment.
-     * @return predicted address of the vault
-     */
-    function predictVaultAddress(uint64 version, address ownerAddr, bytes calldata data, bytes32 salt)
+    function predictVaultAddress(uint64 vaultImpl, address ownerAddr, bytes calldata data)
         external
         view
         returns (address);
 
     /**
-     * @notice Upgrade a vault to a new implementation version.
-     * @param vault address of the vault to upgrade
-     * @param newVersion new version to upgrade to
-     * @param data upgrade data
-     * @dev Only the vault owner can initiate upgrade. The new version must be higher than the current version.
+     * @notice Predict the address of a vault that would be deployed with the given parameters.
+     * @param vaultImpl vault's ID to use
+     * @param ownerAddr initial owner of the vault
+     * @param data initial data for the vault creation
+     * @param salt for CREATE2 deployment.
+     * @return predicted address of the vault
      */
-    function upgrade(address vault, uint64 newVersion, bytes calldata data) external;
+    function predictVaultAddress(uint64 vaultImpl, address ownerAddr, bytes calldata data, bytes32 salt)
+        external
+        view
+        returns (address);
 
     /**
-     * @notice Upgrade multiple vaults to a new implementation version in a single transaction.
-     * @param vaultAddresses array of vault addresses to upgrade
-     * @param newVersion new version to upgrade all vaults to
-     * @param data upgrade data to use for all vault upgrades
-     * @dev Only the vault owners can initiate upgrade for their respective vaults. The new version must be higher than the current version for each vault.
+     * @notice Upgrade a vault to a new implementation vault ID.
+     * @param vault address of the vault to upgrade
+     * @param newVaultImpl new vault ID to upgrade to
+     * @param data upgrade data
+     * @dev Only the vault owner can initiate upgrade. The new vault ID must be higher than the current vault ID.
      */
-    function batchUpgrade(address[] calldata vaultAddresses, uint64 newVersion, bytes[] calldata data) external;
+    function upgrade(address vault, uint64 newVaultImpl, bytes calldata data) external;
+
+    /**
+     * @notice Upgrade multiple vaults to a new implementation vault ID in a single transaction.
+     * @param vaultAddresses array of vault addresses to upgrade
+     * @param newVaultImpl new vault ID to upgrade all vaults to
+     * @param data upgrade data to use for all vault upgrades
+     * @dev Only the vault owners can initiate upgrade for their respective vaults. The new vault ID must be higher than the current vault ID for each vault.
+     */
+    function batchUpgrade(address[] calldata vaultAddresses, uint64 newVaultImpl, bytes[] calldata data) external;
 
     /**
      * @notice Get the last available version.
@@ -144,27 +183,27 @@ interface IConcreteFactory {
     function lastVersion() external view returns (uint64);
 
     /**
-     * @notice Get the implementation for a given version.
-     * @param version version to get the implementation for
+     * @notice Get the implementation for a given vault ID.
+     * @param vaultImpl vault ID to get the implementation for
      * @return address of the implementation
-     * @dev Reverts when an invalid version.
+     * @dev First checks if vaultImplToImplementation mapping has an entry, otherwise falls back to getImplementationByVersion.
      */
-    function getImplementationByVersion(uint64 version) external view returns (address);
+    function getImplementationByVaultImpl(uint64 vaultImpl) external view returns (address);
 
     /**
      * @notice Get if an implementation is blocked
-     * @param version version to check
+     * @param vaultImpl vault ID to check
      * @return bool true if the implementation is blocked
      */
-    function isBlocked(uint64 version) external view returns (bool);
+    function isBlocked(uint64 vaultImpl) external view returns (bool);
 
     /**
-     * @notice Get if a version is migratable to another version
-     * @param fromVersion version to check
-     * @param toVersion version to check
-     * @return bool true if the version is migratable
+     * @notice Get if a vault ID is migratable to another vault ID
+     * @param fromVaultImpl vault ID to check
+     * @param toVaultImpl vault ID to check
+     * @return bool true if the vault ID is migratable
      */
-    function isMigratable(uint64 fromVersion, uint64 toVersion) external view returns (bool);
+    function isMigratable(uint64 fromVaultImpl, uint64 toVaultImpl) external view returns (bool);
 
     /**
      * @notice Check if a vault was deployed by this factory
@@ -179,4 +218,23 @@ interface IConcreteFactory {
      * @dev Only the factory owner can register vaults. The vault must be a valid upgradeable vault.
      */
     function registerVault(address vault) external;
+
+    /**
+     * @notice Set the default fee configuration for new vaults.
+     * @param managementFeeRecipient The address of the default management fee recipient
+     * @param performanceFeeRecipient The address of the default performance fee recipient
+     * @dev Only the factory owner can set this. Applied to newly created vaults.
+     */
+    function setDefaultEnforcedVaultConfiguration(address managementFeeRecipient, address performanceFeeRecipient)
+        external;
+
+    /**
+     * @notice Get the default configuration for new vaults.
+     * @return defaultManagementFeeRecipient The default management fee recipient
+     * @return defaultPerformanceFeeRecipient The default performance fee recipient
+     */
+    function getDefaultEnforcedVaultConfiguration()
+        external
+        view
+        returns (address defaultManagementFeeRecipient, address defaultPerformanceFeeRecipient);
 }

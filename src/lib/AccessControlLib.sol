@@ -93,4 +93,52 @@ library ACL_OZ_5_2_0_Lib {
         $ac._roles[role].adminRole = adminRole;
         emit IAccessControl.RoleAdminChanged(role, previousAdminRole, adminRole);
     }
+
+    /**
+     * @dev Returns the number of accounts that have `role`. Can be used
+     * together with {getRoleMember} to enumerate all bearers of a role.
+     */
+    function _getRoleMemberCount(bytes32 role) internal view returns (uint256) {
+        AccessControlEnumerableUpgradeable.AccessControlEnumerableStorage storage $ace =
+            __getAccessControlEnumerableStorage();
+        return $ace._roleMembers[role].length();
+    }
+
+    /**
+     * @dev Returns one of the accounts that have `role`. `index` must be a
+     * value between 0 and {getRoleMemberCount}, non-inclusive.
+     */
+    function _getRoleMember(bytes32 role, uint256 index) internal view returns (address) {
+        AccessControlEnumerableUpgradeable.AccessControlEnumerableStorage storage $ace =
+            __getAccessControlEnumerableStorage();
+        return $ace._roleMembers[role].at(index);
+    }
+
+    /**
+     * @dev Revokes `role` from `account`.
+     *
+     * Internal function without access restriction.
+     *
+     * Emits a {RoleRevoked} event.
+     */
+    function _revokeRole(bytes32 role, address account, address sender) internal returns (bool) {
+        AccessControlEnumerableUpgradeable.AccessControlEnumerableStorage storage $ace =
+            __getAccessControlEnumerableStorage();
+        bool revoked = __revokeRole(role, account, sender);
+        if (revoked) {
+            $ace._roleMembers[role].remove(account);
+        }
+        return revoked;
+    }
+
+    function __revokeRole(bytes32 role, address account, address sender) private returns (bool) {
+        AccessControlUpgradeable.AccessControlStorage storage $ac = __getAccessControlStorage();
+        if (__hasRole(role, account)) {
+            $ac._roles[role].hasRole[account] = false;
+            emit IAccessControl.RoleRevoked(role, account, sender);
+            return true;
+        } else {
+            return false;
+        }
+    }
 }

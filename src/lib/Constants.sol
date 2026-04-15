@@ -10,6 +10,6 @@ library ConcreteV2FeeParamsLib {
     /// @dev Maximum management fee in basis points (10% = 1,000 bps)
     uint16 public constant MAX_MANAGEMENT_FEE = 1_000;
 
-    /// @dev Maximum performance fee in basis points (30% = 3,000 bps)
-    uint16 public constant MAX_PERFORMANCE_FEE = 3_000;
+    /// @dev Maximum performance fee in basis points (100% = 10,000 bps)
+    uint16 public constant MAX_PERFORMANCE_FEE = 10_000;
 }

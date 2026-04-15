@@ -46,7 +46,7 @@ contract LayerZeroClaimUnitTest is ConcretePredepositVaultImplBaseSetup {
         asset.approve(address(predepositVault), 10000e18);
 
         // Deploy and setup strategy
-        strategy = new ERC4626StrategyMock(address(asset));
+        strategy = new ERC4626StrategyMock(address(asset), address(predepositVault));
         vm.prank(strategyOperator);
         predepositVault.addStrategy(address(strategy));
 

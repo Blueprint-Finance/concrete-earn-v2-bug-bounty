@@ -3,6 +3,8 @@ pragma solidity ^0.8.24;
 
 import {Hooks, IHook} from "../interface/IHook.sol";
 
+error FlagIndexOutOfBounds(uint8 flagIndex);
+
 /// @title HooksMainLib
 /// @dev Hooks library for four user action hooks: pre-deposit, pre-mint, pre-withdraw, pre-redeem.
 /// @dev Hooks library for two strategy hooks: pre-add-strategy, pre-remove-strategy.
@@ -26,6 +28,12 @@ library HooksLibV1 {
     function flagIsSet(Hooks memory h, uint8 flagIndex) internal pure returns (bool) {
         if (flagIndex >= 96) return false;
         return (uint96(h.flags) & (1 << flagIndex)) != 0;
+    }
+
+    function setFlag(Hooks memory h, uint8 flagIndex) internal pure returns (uint96) {
+        if (flagIndex >= 96) revert FlagIndexOutOfBounds(flagIndex);
+        h.flags = uint96(h.flags | (1 << flagIndex));
+        return h.flags;
     }
 
     function checkIsValid(Hooks memory h, uint8 flagIndex) internal pure returns (bool) {

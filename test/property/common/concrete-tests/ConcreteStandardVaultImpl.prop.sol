@@ -126,6 +126,7 @@ abstract contract ConcreteStandardVaultImplProp is ERC4626Prop {
 
         // Perform allocation and yield accrual
         _performStrategyAllocation();
+        vm.prank(_getAllocator());
         IConcreteStandardVaultImpl(_vault_).accrueYield();
 
         vm.prank(caller);
@@ -216,7 +217,8 @@ abstract contract ConcreteStandardVaultImplProp is ERC4626Prop {
             }
         }
 
-        // Accrue the yield
+        // Accrue the yield (requires ALLOCATOR role)
+        vm.prank(_getAllocator());
         IConcreteStandardVaultImpl(_vault_).accrueYield();
     }
 

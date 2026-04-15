@@ -7,6 +7,8 @@ import {IAllocateModule} from "../../../src/interface/IAllocateModule.sol";
 import {ERC4626StrategyMock} from "../../mock/ERC4626StrategyMock.sol";
 import {AddStrategyWithDeallocationOrder} from "../../common/AddStrategyWithDeallocationOrder.sol";
 import {IConcreteStandardVaultImpl} from "../../../src/interface/IConcreteStandardVaultImpl.sol";
+import {PausableUpgradeable} from "@openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
+import {ConcreteV2RolesLib as RolesLib} from "../../../src/lib/Roles.sol";
 
 contract AccrueYieldUnitTest is ConcreteStandardVaultImplBaseSetup, AddStrategyWithDeallocationOrder {
     address public user1;
@@ -18,7 +20,7 @@ contract AccrueYieldUnitTest is ConcreteStandardVaultImplBaseSetup, AddStrategyW
 
         user1 = makeAddr("user1");
 
-        strategy = new ERC4626StrategyMock(address(asset));
+        strategy = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
 
         addStrategyWithDeallocationOrder(address(strategy), address(concreteStandardVault), allocator, strategyOperator);
 
@@ -66,6 +68,7 @@ contract AccrueYieldUnitTest is ConcreteStandardVaultImplBaseSetup, AddStrategyW
         assertApproxEqAbs(strategyTotalAllocatedValue - allocatedAmount, yield, 1);
         (uint256 previewedLastTotalAssets,) = concreteStandardVault.previewAccrueYield();
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         assertEq(concreteStandardVault.getStrategyData(address(strategy)).allocated, strategyTotalAllocatedValue);
@@ -87,6 +90,7 @@ contract AccrueYieldUnitTest is ConcreteStandardVaultImplBaseSetup, AddStrategyW
         uint256 lastTotalAssetsBefore = concreteStandardVault.cachedTotalAssets();
         (uint256 previewedLastTotalAssets,) = concreteStandardVault.previewAccrueYield();
 
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         assertEq(concreteStandardVault.cachedTotalAssets(), lastTotalAssetsBefore - loss);
@@ -129,9 +133,22 @@ contract AccrueYieldUnitTest is ConcreteStandardVaultImplBaseSetup, AddStrategyW
         (uint256 previewTotalAssets, uint256 previewTotalSupply) = concreteStandardVault.previewAccrueYield();
 
         // Now call the FULL accrual process (which includes management fee calculation)
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         assertEq(concreteStandardVault.totalAssets(), previewTotalAssets);
         assertEq(concreteStandardVault.totalSupply(), previewTotalSupply);
+    }
+
+    function testPausePreventsAccrueYield() public {
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteStandardVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteStandardVault.pause();
+
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteStandardVault.accrueYield();
     }
 }

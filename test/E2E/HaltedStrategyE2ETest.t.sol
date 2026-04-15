@@ -27,9 +27,9 @@ contract HaltedStrategyE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         user2 = makeAddr("user2");
 
         // Deploy strategies
-        activeStrategy = new ERC4626StrategyMock(address(asset));
-        haltedStrategy = new ERC4626StrategyMock(address(asset));
-        strategy3 = new ERC4626StrategyMock(address(asset));
+        activeStrategy = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
+        haltedStrategy = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
+        strategy3 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
 
         vm.label(address(activeStrategy), "activeStrategy");
         vm.label(address(haltedStrategy), "haltedStrategy");
@@ -226,6 +226,7 @@ contract HaltedStrategyE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         uint256 lastTotalAssetsBefore = concreteStandardVault.cachedTotalAssets();
 
         // Yield accrual should only process Active strategies
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         uint256 lastTotalAssetsAfter = concreteStandardVault.cachedTotalAssets();
@@ -351,7 +352,7 @@ contract HaltedStrategyE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         );
 
         // Step 4: Add new fixed strategy to the vault
-        ERC4626StrategyMock newFixedStrategy = new ERC4626StrategyMock(address(asset));
+        ERC4626StrategyMock newFixedStrategy = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
         vm.label(address(newFixedStrategy), "newFixedStrategy");
 
         vm.prank(strategyOperator);
