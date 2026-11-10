@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.27;
 
 import {IStrategyTemplate} from "../../interface/IStrategyTemplate.sol";
+import {ITimelockProtected} from "../../interface/ITimelockProtected.sol";
 
 /**
  * @title IBaseStrategy
- * @dev Interface for BaseStrategy extending IStrategyTemplate
- * @dev Contains events and errors specific to BaseStrategy
+ * @dev Interface for BaseStrategy extending IStrategyTemplate and the shared
+ *      {ITimelockProtected} surface.
+ * @dev Contains events and errors specific to BaseStrategy.
  */
-interface IBaseStrategy is IStrategyTemplate {
+interface IBaseStrategy is IStrategyTemplate, ITimelockProtected {
     /**
      * @notice Emitted when funds are allocated from the vault to the strategy
      * @param amount The amount of funds allocated
@@ -75,4 +77,16 @@ interface IBaseStrategy is IStrategyTemplate {
      * @dev The vault address must be a valid non-zero address
      */
     error ZeroVaultAddress();
+
+    /**
+     * @notice Thrown when the calldata length is invalid (too short)
+     * @dev The calldata must contain at least the required amount of data
+     */
+    error InvalidDataLength();
+
+    /**
+     * @notice Thrown when removing a ROLE_ADMIN would leave the strategy with no admins.
+     * @dev The last remaining ROLE_ADMIN cannot revoke or renounce its own admin role.
+     */
+    error CannotRemoveLastRoleAdmin();
 }

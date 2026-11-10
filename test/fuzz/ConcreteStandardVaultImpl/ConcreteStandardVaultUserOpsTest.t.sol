@@ -35,8 +35,8 @@ contract ConcreteStandardVaultUserOpsFuzzTest is ConcreteStandardVaultImplBaseSe
         ConcreteStandardVaultImplBaseSetup.setUp();
         user1 = makeAddr("user1");
         // Deploy strategies
-        strategy1 = new ERC4626StrategyMock(address(asset));
-        strategy2 = new ERC4626StrategyMock(address(asset));
+        strategy1 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
+        strategy2 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
 
         vm.label(address(strategy1), "strategy1");
         vm.label(address(strategy2), "strategy2");
@@ -60,14 +60,21 @@ contract ConcreteStandardVaultUserOpsFuzzTest is ConcreteStandardVaultImplBaseSe
         concreteStandardVault.updateManagementFeeRecipient(recipient);
         vm.stopPrank();
         vm.startPrank(vaultManager);
-        concreteStandardVault.updatePerformanceFee(uint16(performanceFee));
-        concreteStandardVault.updateManagementFee(uint16(managementFee));
+        concreteStandardVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.PerformanceFee, abi.encode(uint16(performanceFee))
+        );
+        concreteStandardVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.ManagementFee, abi.encode(uint16(managementFee))
+        );
         vm.stopPrank();
     }
 
     function _setWithdrawLimits(uint256 minWithdrawAmount, uint256 maxWithdrawAmount) internal {
         vm.startPrank(vaultManager);
-        concreteStandardVault.setWithdrawLimits(minWithdrawAmount, maxWithdrawAmount);
+        concreteStandardVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits,
+            abi.encode(minWithdrawAmount, maxWithdrawAmount)
+        );
         vm.stopPrank();
     }
 
@@ -198,11 +205,10 @@ contract ConcreteStandardVaultUserOpsFuzzTest is ConcreteStandardVaultImplBaseSe
                 // error AssetAmountOutOfBounds(address sender, uint256 assets, uint256 minDepositAmount, uint256 maxDepositAmount);
                 vm.expectRevert(
                     abi.encodeWithSelector(
-                        IConcreteStandardVaultImpl.AssetAmountOutOfBounds.selector,
+                        IConcreteStandardVaultImpl.MinimumWithdrawAmountNotMet.selector,
                         sender,
                         withdrawAmount,
-                        globalMinWithdrawAmount,
-                        globalMaxWithdrawAmount
+                        globalMinWithdrawAmount
                     )
                 );
                 vm.startPrank(sender);

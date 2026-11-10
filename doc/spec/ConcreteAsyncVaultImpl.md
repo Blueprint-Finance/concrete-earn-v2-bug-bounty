@@ -15,25 +15,26 @@ The ConcreteAsyncVaultImpl introduces an epoch-based asynchronous withdrawal sys
 ### 2.1 Core Components
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                ConcreteAsyncVaultImpl                          │
-├────────────────────────────────────────────────────────────────┤
-│  ┌─────────────────┐  ┌──────────────────┐  ┌─────────────────┐│
-│  │  User Interface │  │  Withdrawal Mgr  │  │  Vault Manager  ││
-│  │                 │  │                  │  │                 ││
-│  │ • withdraw()    │  │ • closeEpoch()   │  │ • toggleQueue   ││
-│  │ • redeem()      │  │ • processEpoch() │  │   Active()      ││
-│  │ • claim()       │  │ • moveRequest    │  │                 ││
-│  │ • cancel()      │  │   ToNextEpoch()  │  │                 ││
-│  │                 │  │ • claimForUser() │  │                 ││
-│  │                 │  │ • cancelForUser()│  │                 ││
-│  │                 │  │ • claimUsers     │  │                 ││
-│  │                 │  │   Batch()        │  │                 ││
-│  └─────────────────┘  └──────────────────┘  └─────────────────┘│
-├────────────────────────────────────────────────────────────────┤
-│                    ConcreteStandardVaultImpl                   │
-│              (Strategy Management & Base Functionality)        │
-└────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                     ConcreteAsyncVaultImpl                           │
+├──────────────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐  ┌────────────────────────┐  ┌─────────────────┐│
+│  │  User Interface │  │    Withdrawal Mgr      │  │  Vault Manager  ││
+│  │                 │  │                        │  │                 ││
+│  │ • withdraw()    │  │ • closeEpoch()         │  │ • toggleQueue   ││
+│  │ • redeem()      │  │ • processEpoch()       │  │   Active()      ││
+│  │ • claim()       │  │ • processPartial       │  │ • configure()   ││
+│  │ • cancel()      │  │   EpochRequest()       │  │  (cancellation) ││
+│  │                 │  │ • moveRequest          │  │                 ││
+│  │                 │  │   ToNextEpoch()        │  │                 ││
+│  │                 │  │ • claimForUser()       │  │                 ││
+│  │                 │  │ • cancelForUser()      │  │                 ││
+│  │                 │  │ • claimUsersBatch()    │  │                 ││
+│  └─────────────────┘  └────────────────────────┘  └─────────────────┘│
+├──────────────────────────────────────────────────────────────────────┤
+│                      ConcreteStandardVaultImpl                       │
+│                (Strategy Management & Base Functionality)            │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.2 State Architecture
@@ -92,12 +93,28 @@ The async withdrawal system operates in four distinct phases:
 
 #### Phase 3: Epoch Processing
 
-1. Withdrawal Manager calls `processEpoch(epochID)` to process a specific closed epoch
+Epoch processing can happen via two complementary paths:
+
+**Path A — Batch processing (`processEpoch()`)**:
+
+1. Withdrawal Manager calls `processEpoch()` to process the closed epoch (`latestEpochID - 1`)
 2. All pending requests for that epoch are batched and processed
 3. Share price is calculated and locked for that specific epoch
 4. Shares are burned from the vault
 5. Assets are reserved for users claims
 6. Price is stored as `epochPricePerSharePlusOne` (price + 1 to distinguish from unprocessed)
+
+**Path B — Partial epoch processing (`processPartialEpochRequest()`)**:
+
+1. Backend monitors idle liquidity and selects the next request to fulfil from a FIFO queue
+2. Backend decides how many of the user's shares to fulfil now (`type(uint256).max` for the entire request)
+3. Withdrawal Manager calls `processPartialEpochRequest(user, epochID, amount)`; shares that are not fulfilled stay in the closed epoch
+4. Share price is calculated at call time and assets are transferred to the user immediately (no claim step)
+5. Shares are burned, user's request and epoch totals are reduced by the fulfilled shares
+6. This can be repeated for each request as liquidity becomes available
+7. Eventually `processEpoch()` is called to batch-settle any remaining requests and mark the epoch as processed
+
+Paths A and B can be combined: partial fulfilments reduce the epoch's outstanding shares, and `processEpoch()` settles whatever remains.
 
 #### Phase 4: Claim Execution
 
@@ -112,6 +129,8 @@ Alternatively, withdrawal manager can claim on behalf of users:
 2. Assets are distributed based on locked epoch prices
 3. Reserved assets are released from vault
 
+**Note**: Users whose requests were fulfilled via partial epoch processing (Path B) do **not** need to call `claimWithdrawal` — their assets were already transferred at fulfilment time.
+
 ### 3.2 State Transitions
 
 ```
@@ -124,6 +143,17 @@ Epoch N-1: CLOSED       Epoch N-1: PROCESSED   Epoch N: ACTIVE
 │   unwinding     │     │ • Next epoch    │     │                 │
 │   funds         │     │   can be closed │     │                 │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
+        │
+        │  (alternative: partial epoch processing)
+        ▼
+┌─────────────────────────────────────────┐
+│ Epoch N-1: PARTIAL PROCESSING           │
+│ • Individual requests fulfilled         │
+│ • Assets transferred immediately        │
+│ • Remaining shares decremented          │
+│ • Eventually → processEpoch() to        │
+│   finalize and mark as PROCESSED        │
+└─────────────────────────────────────────┘
 ```
 
 ---
@@ -146,11 +176,11 @@ User Journey: Alice wants to withdraw 1000 USDC
    ├── Increments epoch ID (rollover to new epoch)
    ├── Epoch can be closed even if empty
    ├── Begins unwinding funds from strategies
-   └── Emits EpochClosed(epochId, totalShares)
+   └── Emits EpochClosed(epochId)
 
 3. Alice waits for epoch processing...
 
-4. Withdrawal Manager calls: vault.processEpoch(epochId)
+4. Withdrawal Manager calls: vault.processEpoch()
    ├── Calculates share price: 1.005 USDC/share
    ├── Burns 995 shares from vault
    ├── Reserves assets: 995 × 1.005 = ~1000 USDC
@@ -161,7 +191,7 @@ User Journey: Alice wants to withdraw 1000 USDC
    ├── Calculates claimable: 995 × 1.005 = ~1000 USDC
    ├── Burns 995 shares from vault
    ├── Transfers 1000 USDC to Alice
-   └── Emits RequestClaimed(alice, 1000e6)
+   └── Emits RequestClaimed(alice, 1000e6, [epochId])
 ```
 
 ### 4.2 Request Cancellation Flow
@@ -177,6 +207,7 @@ Before epoch is closed, Alice can cancel specific epoch requests:
    └── Emits RequestCancelled(alice, shares, epochID)
 
 Note: Once an epoch is closed via closeEpoch(), requests can no longer be cancelled.
+Note: Cancellation can be switched off per vault by the vault manager via configure(CancellationEnabled, abi.encode(false)) (timelocked). While it is off, both cancelRequest variants revert with CancellationDisabled. Check with cancellationEnabled().
 
 Alternatively, withdrawal manager can cancel requests on behalf of users:
 
@@ -201,7 +232,7 @@ Alice has requests in epochs 5, 7, and 9 (all processed):
    ├── Aggregates total assets and shares
    ├── Burns total shares from vault in single operation
    ├── Transfers total assets to Alice in single operation
-   └── Emits RequestClaimed(alice, totalAssets)
+   └── Emits RequestClaimed(alice, totalAssets, [5, 7, 9])
 
 Alternatively, withdrawal manager can claim on behalf of users:
 
@@ -211,7 +242,7 @@ Alternatively, withdrawal manager can claim on behalf of users:
    ├── Aggregates total assets and shares for the user
    ├── Burns total shares from vault in single operation
    ├── Transfers total assets to the specified user
-   └── Emits RequestClaimed(user, totalAssets)
+   └── Emits RequestClaimed(user, totalAssets, epochIDs)
 ```
 
 ### 4.4 Batch User Claiming Flow
@@ -226,10 +257,74 @@ Withdrawal Manager can process claims for multiple users in a single epoch:
    │   ├── Calculates claimable assets using locked epoch price
    │   ├── Clears user's request from the epoch
    │   ├── Transfers assets directly to the user
-   │   └── Emits RequestClaimed(user, assets)
+   │   └── Emits RequestClaimed(user, assets, [epochID])
    ├── Updates vault accounting to release reserved assets
    └── Optimized for gas efficiency with single epoch price lookup
 ```
+
+### 4.5 Priority Withdrawal Flow
+
+Users who need immediate access to funds can request a priority withdrawal that bypasses the epoch cycle. The operator unwinds the position, deallocates the net amount back to the vault, and calls `claimPriorityWithdrawal`. The unwind cost is deducted from the user's withdrawal and recorded on the strategy via `IAsyncAccounting.adjustTotalAssets`, which the next yield accrual reconciles automatically.
+
+```
+Operator fast-track flow:
+
+1. accrueYield()               ← optional, only if exchange rate changed
+2. Unwind position              ← off-chain / underlying protocol
+3. deallocate(grossAssets - unwindCost)
+4. claimPriorityWithdrawal(user, sharesToFulfil, unwindCost, strategy)
+   ├── withYieldAccrual modifier runs first
+   ├── cachedTotalAssets -= netAssets
+   ├── Shares burned, request cleared/reduced
+   ├── strategy.adjustTotalAssets(-unwindCost)
+   └── netAssets transferred to user
+```
+
+- **Role**: `PRIORITY_WITHDRAWAL_EXECUTOR` (not granted by default; assigned by `ROLE_ADMIN`)
+- **Unwind cost cap**: Configurable via `setUnwindCostCap` (default 5%)
+- **Exchange rate**: Unchanged from the user perspective (`convertToAssets` previews pending yield delta)
+
+See [PriorityWithdrawal.md](PriorityWithdrawal.md) for the full specification.
+
+### 4.6 Partial Epoch Processing Flow
+
+After an epoch is closed, the withdrawal manager can fulfil individual requests progressively as idle liquidity becomes available, rather than waiting for full liquidity to batch-settle the entire epoch via `processEpoch()`. A backend service maintains request ordering via subgraph event indexing and dispatches fulfilments in FIFO order.
+
+```
+Epoch N closed, users have pending requests:
+
+1. Backend monitors idle liquidity (vaultBalance - pastEpochsUnclaimedAssets)
+
+2. Backend selects next request in queue order (Alice)
+   └── Decides how many of Alice's shares to fulfil now
+
+3. Withdrawal Manager calls: vault.processPartialEpochRequest(alice, epochID, amount)
+   ├── withYieldAccrual modifier ensures fresh share price
+   ├── Validates epochID is closed and not yet processed (intent check)
+   ├── Takes `amount` of Alice's shares (all for type(uint256).max)
+   ├── Calculates assets = shares × sharePrice / 10^decimals (floor)
+   ├── Validates idle liquidity ≥ assets
+   ├── Zeros out Alice's epoch request
+   ├── Reduces totalRequestedSharesPerEpoch by shares
+   ├── Burns shares from vault
+   ├── Reduces cachedTotalAssets by assets
+   ├── Transfers assets to Alice immediately
+   └── Emits PartialEpochRequestProcessed(alice, epochID, shares, assets)
+
+4. Repeat for next user in queue when liquidity is available...
+
+5. When all requests are drained or enough liquidity exists for the rest:
+   Withdrawal Manager calls: vault.processEpoch()
+   └── Batch-settles any remaining requests and marks epoch as processed
+```
+
+- **Role**: `WITHDRAWAL_MANAGER` (same as `processEpoch` and `closeEpoch`)
+- **Parameters**: `address user`, `uint256 epochID`
+- **Liquidity source**: Idle vault balance only (no strategy unwinding or unwind cost)
+- **Exchange rate**: Preserved — shares burned and assets deducted proportionally
+- **Epoch finalization**: Epoch remains in `Processing` state until `processEpoch()` is called, even if all individual requests are fulfilled
+
+See [PartialEpochProcessing.md](PartialEpochProcessing.md) for the full specification.
 
 ---
 
@@ -258,7 +353,7 @@ sequenceDiagram
     V->>S: Begin unwinding funds
 
     Note over U,S: Epoch Processing
-    WM->>V: processEpoch(epochID)
+    WM->>V: processEpoch()
     V->>V: Harvest all strategies
     V->>S: Query current strategy values
     S->>V: Return updated values
@@ -295,7 +390,7 @@ sequenceDiagram
     V->>V: Increment epoch ID
 
     Note over U1,WM: Batch Processing
-    WM->>V: processEpoch(epochID)
+    WM->>V: processEpoch()
     V->>V: Process all requests together
     V->>V: Calculate price: 1.05 per share
     V->>V: Burn vault-held shares
@@ -311,6 +406,49 @@ sequenceDiagram
 
     U3->>V: claimWithdrawal([epochID])
     V->>U3: Transfer assets based on locked price
+```
+
+### 5.3 Partial Epoch Processing
+
+```mermaid
+sequenceDiagram
+    participant B as Backend
+    participant WM as Withdrawal Manager
+    participant V as AsyncVault
+    participant U1 as User 1
+    participant U2 as User 2
+    participant U3 as User 3
+
+    Note over B,U3: Epoch N - Requests collected
+    U1->>V: withdraw(500)
+    U2->>V: redeem(300)
+    U3->>V: withdraw(200)
+
+    Note over B,U3: Epoch Closure
+    WM->>V: closeEpoch()
+    V->>V: Lock shares, increment epoch
+
+    Note over B,U3: Progressive draining as liquidity arrives
+    B->>B: Check idle liquidity (sufficient for U1)
+    WM->>V: processPartialEpochRequest(U1, epochN, max)
+    V->>V: Validate epochN closed & unprocessed
+    V->>V: Read U1 full request (500), compute price, burn shares
+    V->>U1: Transfer assets immediately
+    V-->>B: PartialEpochRequestProcessed
+
+    B->>B: Check idle liquidity (sufficient for U2)
+    WM->>V: processPartialEpochRequest(U2, epochN, max)
+    V->>V: Read U2 full request (300), compute price, burn shares
+    V->>U2: Transfer assets immediately
+    V-->>B: PartialEpochRequestProcessed
+
+    Note over B,U3: Finalize epoch (settle U3 remainder)
+    WM->>V: processEpoch()
+    V->>V: Settle U3's 200 shares, mark epoch processed
+
+    Note over B,U3: U3 claims (U1 & U2 already received assets)
+    U3->>V: claimWithdrawal([epochID])
+    V->>U3: Transfer 200 assets
 ```
 
 ---
@@ -335,39 +473,71 @@ The async vault implementation provides comprehensive epoch management with thre
 - **State Changes**:
   - Increments `latestEpochID`
   - Freezes `totalRequestedSharesPerEpoch[closedEpochID]`
-- **Emits**: `EpochClosed(epochID, totalShares)`
+- **Emits**: `EpochClosed(epochID)`
 
-#### `processEpoch(uint256 epochID)`
+#### `processEpoch()`
 
-- **Purpose**: Process withdrawal requests for a specific closed epoch
+- **Purpose**: Process withdrawal requests of the closed epoch
 - **Functionality**:
-  - Processes a previously closed epoch (not necessarily the most recent)
+  - Processes the closed epoch `latestEpochID - 1`. A new epoch can only be closed once the previous one is processed, so there is at most one closed, unprocessed epoch
   - Calculates share price using `_convertToAssets()`
   - Validates sufficient liquid assets are available
   - Burns shares held by the vault for this epoch
   - Reserves assets for future claiming
   - Stores (price + 1) in `epochPricePerSharePlusOne[epochID]` to distinguish from unprocessed (0)
 - **Access Control**: Only callable by `WITHDRAWAL_MANAGER` role
-- **Parameters**: `epochID` - The ID of the closed epoch to process
+- **Parameters**: none
 - **Modifiers**: `withYieldAccrual`, `nonReentrant`
 - **State Changes**:
   - Updates `pastEpochsUnclaimedAssets`
   - Clears `totalRequestedSharesPerEpoch[epochID]`
   - Stores `epochPricePerSharePlusOne[epochID] = price + 1`
 
-#### `moveRequestToNextEpoch(address user)`
+#### `moveRequestToNextEpoch(address user, uint256 epochID, uint256 amount)`
 
-- **Purpose**: Move a user's withdrawal request from current epoch to next epoch
+- **Purpose**: Move all or part of a user's withdrawal request from the latest closed epoch to the current active epoch
 - **Functionality**:
-  - Moves user's shares from current epoch to next epoch
-  - Updates both current and next epoch request mappings
-  - Maintains total requested shares per epoch accounting
+  - Validates that `epochID` matches `latestEpochID - 1` (the closed, unprocessed epoch) — intent-validation parameter
+  - Validates the closed epoch is not already processed
+  - Moves the specified `amount` of shares (or the full request if `amount == type(uint256).max`) from the closed epoch to the active epoch
+  - Updates both epoch request mappings and totals
 - **Access Control**: Only callable by `WITHDRAWAL_MANAGER` role
-- **Parameters**: `user` - Address of the user whose request to move
+- **Parameters**:
+  - `user` — Address of the user whose request to move
+  - `epochID` — Must equal `latestEpochID - 1` (intent validation)
+  - `amount` — Shares to move; pass `type(uint256).max` to move the entire request
 - **State Changes**:
-  - Decreases `userEpochRequests[user][currentEpoch]`
-  - Increases `userEpochRequests[user][nextEpoch]`
+  - Decreases `userEpochRequests[user][closedEpochID]` by shares moved
+  - Increases `userEpochRequests[user][latestEpochID]` by shares moved
   - Updates `totalRequestedSharesPerEpoch` for both epochs
+- **Emits**: `RequestMovedToNextEpoch(user, sharesToMove, closedEpochID, latestEpochID)`
+
+#### `processPartialEpochRequest(address user, uint256 epochID, uint256 amount)`
+
+- **Purpose**: Fulfil all or part of a user's withdrawal request from a closed-but-unprocessed epoch, transferring assets immediately
+- **Functionality**:
+  - Validates the provided `epochID` is closed and not yet processed (intent-validation parameter)
+  - Takes `amount` shares of the user's request (`type(uint256).max` for all of it); must not exceed the request
+  - Computes share price at current exchange rate (via `withYieldAccrual`)
+  - Calculates assets using floor rounding (protocol-favourable)
+  - Validates sufficient idle liquidity (vault balance minus `pastEpochsUnclaimedAssets`)
+  - Burns the fulfilled shares and reduces the request by them
+  - Transfers assets to the user immediately (no separate claim step)
+  - Shares that are not fulfilled stay in the closed epoch and are settled by `processEpoch()`
+- **Access Control**: Only callable by `WITHDRAWAL_MANAGER` role
+- **Parameters**:
+  - `user` — Address of the user whose request to fulfil
+  - `epochID` — The closed epoch to target (must be closed and not yet processed)
+  - `amount` — Shares to fulfil; `type(uint256).max` for the entire request
+- **Modifiers**: `withYieldAccrual`, `nonReentrant`
+- **State Changes**:
+  - Zeros out `userEpochRequests[user][epochID]`
+  - Decreases `totalRequestedSharesPerEpoch[epochID]` by the user's shares
+  - Decreases `cachedTotalAssets` by the calculated assets
+  - Burns the user's shares held by the vault
+- **Emits**: `PartialEpochRequestProcessed(user, epochID, shares, assets)`
+
+See [PartialEpochProcessing.md](PartialEpochProcessing.md) for the full specification.
 
 #### **Use Cases for Epoch Management**
 
@@ -376,6 +546,7 @@ The async vault implementation provides comprehensive epoch management with thre
 3. **Operational Flexibility**: Manage withdrawal timing based on market conditions
 4. **Emergency Handling**: Process epochs out of order if needed, move requests during operational issues
 5. **Empty Epochs**: Close empty epochs to advance the system even without pending requests
+6. **Progressive Draining**: Fulfil individual requests as idle liquidity arrives via partial epoch processing, reducing average user wait time
 
 #### **Processing Flow Example**
 
@@ -385,21 +556,37 @@ vault.closeEpoch(); // Close current epoch, increment to next
 
 // Wait for liquidity to be arranged...
 
-vault.processEpoch(closedEpochID); // Process specific closed epoch
+vault.processEpoch(); // Process the closed epoch
 
-// Example: Moving a user's request to next epoch
-vault.moveRequestToNextEpoch(userAddress); // Move user's request forward
+// Example: Moving a user's full request to next epoch
+vault.moveRequestToNextEpoch(userAddress, closedEpochID, type(uint256).max);
+
+// Example: Partial epoch processing (progressive draining)
+vault.closeEpoch(); // Close current epoch
+
+// Fulfil Alice's full request
+vault.processPartialEpochRequest(alice, closedEpochID, type(uint256).max);
+
+// Fulfil only 200 of Bob's shares; the rest is settled by processEpoch()
+vault.processPartialEpochRequest(bob, closedEpochID, 200);
+
+// Finalize the epoch (settle remainder, mark as processed)
+vault.processEpoch();
 ```
 
 #### **Technical Constraints**
 
 - `closeEpoch()` can only close the current (latest) epoch
-- `processEpoch(epochID)` can process any closed epoch that hasn't been processed yet
+- `processEpoch()` processes the closed epoch `latestEpochID - 1` if it hasn't been processed yet
 - Each epoch can only be processed once (prevents double processing)
 - Epochs must be closed before they can be processed
 - Sufficient vault liquidity must be available for processing
 - Share prices are locked at the time of processing, not at request or closure time
 - `epochPricePerSharePlusOne` value of 0 means unprocessed, non-zero means processed (subtract 1 for actual price)
+- `processPartialEpochRequest()` fulfils `amount` shares of the user's request (`type(uint256).max` for all of it)
+- `moveRequestToNextEpoch()` only moves from the latest closed epoch (`latestEpochID - 1`) to the current active epoch; accepts an `amount` parameter (or `type(uint256).max` for all)
+- `processPartialEpochRequest()` validates the provided `epochID` is closed and not yet processed, and does not mark the epoch as processed
+- Individual fulfilments and batch `processEpoch()` can be freely combined; `processEpoch()` settles whatever shares remain after individual fulfilments
 
 ### 6.3 Operational Benefits
 
@@ -412,6 +599,7 @@ vault.moveRequestToNextEpoch(userAddress); // Move user's request forward
 - **Emergency Handling**: Address processing backlogs without losing user requests, process out of order if needed
 - **Operational Flexibility**: Close new epochs even when previous epochs need more time for liquidity arrangement
 - **Empty Epoch Support**: Close empty epochs to advance the system even without pending requests
+- **Progressive Draining**: Fulfil individual requests via `processPartialEpochRequest()` as idle liquidity arrives, reducing average user wait time without requiring full epoch liquidity upfront. Use `moveRequestToNextEpoch()` to defer a portion of a request when liquidity only covers part of it
 
 #### **For Users**
 

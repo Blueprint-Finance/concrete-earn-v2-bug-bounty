@@ -5,13 +5,13 @@ import {ERC20Upgradeable} from "@openzeppelin-upgradeable/token/ERC20/ERC20Upgra
 import {ConcreteStandardVaultImpl} from "../../src/implementation/ConcreteStandardVaultImpl.sol";
 import {AllocateModule} from "../../src/module/AllocateModule.sol";
 import {ConcreteFactoryBaseSetup} from "../common/ConcreteFactoryBaseSetup.t.sol";
+import {ContractIdEncoding} from "../../src/lib/ContractIdEncoding.sol";
+import {IContractId} from "../../src/interface/IContractId.sol";
 
 contract ConcreteStandardVaultImpl2 is ConcreteStandardVaultImpl {
     constructor(address factory) ConcreteStandardVaultImpl(factory) {}
 
     function _upgrade(
-        uint64,
-        /* oldVersion */
         uint64,
         /* newVersion */
         bytes calldata /* data */
@@ -29,6 +29,20 @@ contract ConcreteStandardVaultImpl2 is ConcreteStandardVaultImpl {
 
         $._name = "Concrete Standard Vault 2";
         $._symbol = "ConcreteStandardVault2";
+    }
+
+    function ID() public pure virtual override(ConcreteStandardVaultImpl) returns (uint64) {
+        return ContractIdEncoding.encode(
+            0,
+            /* contractType=vault */
+            1,
+            /* flavour=standard-vault */
+            9,
+            /* majorVersion=9 (test) */
+            99,
+            /* minorVersion=99 (test) */
+            99 /* patchVersion=99 (test) */
+        );
     }
 }
 
@@ -64,11 +78,14 @@ contract VaultMigrationE2ETest is ConcreteFactoryBaseSetup {
     }
 
     function testDeployProxyWithStandardImplAndMigrateToCAnotherImpl() public {
-        // deploy proxy with version==1 (ConcreteStandardVaultImpl)
+        // Get vault IDs
+        uint64 vaultImpl1 = uint64(IContractId(concreteStandardVaultImpl).ID());
+        uint64 vaultImpl2 = uint64(IContractId(concreteStandardVaultImpl2).ID());
 
+        // deploy proxy with vaultImpl1 (ConcreteStandardVaultImpl)
         vaultProxy = address(
             factory.create(
-                1,
+                vaultImpl1,
                 vaultProxyOwner,
                 abi.encode(
                     address(allocateModule), asset, vaultProxyOwner, "Concrete Standard Vault", "ConcreteStandardVault"
@@ -80,11 +97,11 @@ contract VaultMigrationE2ETest is ConcreteFactoryBaseSetup {
         assertEq(ConcreteStandardVaultImpl(vaultProxy).symbol(), "ConcreteStandardVault");
 
         vm.prank(factoryOwner);
-        factory.setMigratable(1, 2);
+        factory.setMigratable(vaultImpl1, vaultImpl2);
 
-        // migrate to version==2 (ConcreteCappedVaultImpl)
+        // migrate to vaultImpl2 (ConcreteStandardVaultImpl2)
         vm.prank(vaultProxyOwner);
-        factory.upgrade(vaultProxy, 2, abi.encode("Concrete Standard Vault 2", "ConcreteStandardVault2"));
+        factory.upgrade(vaultProxy, vaultImpl2, abi.encode("Concrete Standard Vault 2", "ConcreteStandardVault2"));
 
         assertEq(ConcreteStandardVaultImpl(vaultProxy).name(), "Concrete Standard Vault 2");
         assertEq(ConcreteStandardVaultImpl(vaultProxy).symbol(), "ConcreteStandardVault2");

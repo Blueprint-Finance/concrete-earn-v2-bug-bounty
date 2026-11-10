@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {ConcretePredepositVaultImplBaseSetup} from "../../common/ConcretePredepositVaultImplBaseSetup.t.sol";
 import {ConcretePredepositVaultImpl} from "../../../src/implementation/ConcretePredepositVaultImpl.sol";
 import {ConcreteStandardVaultImpl} from "../../../src/implementation/ConcreteStandardVaultImpl.sol";
+import {IContractId} from "../../../src/interface/IContractId.sol";
 import {IPredepostVaultOApp} from "../../../src/periphery/interface/IPredepostVaultOApp.sol";
 import {PredepostVaultOApp} from "../../../src/periphery/predeposit/PredepostVaultOApp.sol";
 import {IConcretePredepositVaultImpl} from "../../../src/interface/IConcretePredepositVaultImpl.sol";
@@ -31,9 +32,14 @@ contract UpgradeToPredeposit is ConcretePredepositVaultImplBaseSetup {
         user1 = makeAddr("user1");
         user2 = makeAddr("user2");
 
-        // Set migratable path from version 1 (standard) to version 2 (predeposit)
+        // Get vault IDs from implementations
+        uint64 standardVaultImpl = uint64(IContractId(address(concreteStandardVaultImpl)).ID());
+        // Get predeposit vault ID from the deployed vault (which has the same ID as its implementation)
+        uint64 predepositVaultImpl = uint64(IContractId(address(predepositVault)).ID());
+
+        // Set migratable path from standard to predeposit
         vm.prank(factoryOwner);
-        factory.setMigratable(1, 2);
+        factory.setMigratable(standardVaultImpl, predepositVaultImpl);
 
         // Fund user accounts with assets
         asset.mint(user1, 10000e18);
@@ -44,10 +50,10 @@ contract UpgradeToPredeposit is ConcretePredepositVaultImplBaseSetup {
         vm.deal(user2, 10 ether);
         vm.deal(vaultManager, 10 ether);
 
-        // Deploy a standard vault (version 1)
+        // Deploy a standard vault
         standardVault = ConcreteStandardVaultImpl(
             factory.create(
-                1, // Version 1 - ConcreteStandardVaultImpl
+                standardVaultImpl,
                 vaultOwner,
                 abi.encode(address(allocateModule), address(asset), vaultManager, "Standard Vault to Upgrade", "SVTU")
             )
@@ -68,7 +74,7 @@ contract UpgradeToPredeposit is ConcretePredepositVaultImplBaseSetup {
         asset.approve(address(standardVault), 10000e18);
 
         // Deploy and setup strategy
-        strategy = new ERC4626StrategyMock(address(asset));
+        strategy = new ERC4626StrategyMock(address(asset), address(standardVault));
         vm.prank(strategyOperator);
         standardVault.addStrategy(address(strategy));
 
@@ -101,12 +107,12 @@ contract UpgradeToPredeposit is ConcretePredepositVaultImplBaseSetup {
         vm.expectRevert();
         ConcretePredepositVaultImpl(address(standardVault)).getOApp();
 
-        // Upgrade to predeposit vault (version 2) through factory
-        // No upgrade data needed - selfClaimsEnabled defaults to false
-        bytes memory upgradeData = "";
+        // Upgrade to predeposit vault through factory
+        bytes memory upgradeData = abi.encode(asset.balanceOf(address(standardVault)));
+        uint64 predepositVaultImpl = uint64(IContractId(address(predepositVault)).ID());
 
         vm.prank(vaultOwner);
-        factory.upgrade(address(standardVault), 2, upgradeData);
+        factory.upgrade(address(standardVault), predepositVaultImpl, upgradeData);
 
         // Now cast to predeposit vault interface
         ConcretePredepositVaultImpl predepositVault = ConcretePredepositVaultImpl(address(standardVault));
@@ -160,11 +166,11 @@ contract UpgradeToPredeposit is ConcretePredepositVaultImplBaseSetup {
 
     function test_upgradeAndUsePredeposiFeatures() public {
         // Upgrade to predeposit vault through factory
-        // No upgrade data needed - selfClaimsEnabled defaults to false
-        bytes memory upgradeData = "";
+        bytes memory upgradeData = abi.encode(asset.balanceOf(address(standardVault)));
+        uint64 predepositVaultImpl = uint64(IContractId(address(predepositVault)).ID());
 
         vm.prank(vaultOwner);
-        factory.upgrade(address(standardVault), 2, upgradeData);
+        factory.upgrade(address(standardVault), predepositVaultImpl, upgradeData);
 
         ConcretePredepositVaultImpl predepositVault = ConcretePredepositVaultImpl(address(standardVault));
 
@@ -221,10 +227,11 @@ contract UpgradeToPredeposit is ConcretePredepositVaultImplBaseSetup {
         uint256 user1SharesBefore = standardVault.balanceOf(user1);
 
         // Upgrade to predeposit vault through factory
-        bytes memory upgradeData = "";
+        bytes memory upgradeData = abi.encode(asset.balanceOf(address(standardVault)));
+        uint64 predepositVaultImpl = uint64(IContractId(address(predepositVault)).ID());
 
         vm.prank(vaultOwner);
-        factory.upgrade(address(standardVault), 2, upgradeData);
+        factory.upgrade(address(standardVault), predepositVaultImpl, upgradeData);
 
         ConcretePredepositVaultImpl predepositVault = ConcretePredepositVaultImpl(address(standardVault));
 
@@ -253,10 +260,11 @@ contract UpgradeToPredeposit is ConcretePredepositVaultImplBaseSetup {
 
     function test_upgradePreservesStrategyFunctionality() public {
         // Upgrade to predeposit vault through factory
-        bytes memory upgradeData = "";
+        bytes memory upgradeData = abi.encode(asset.balanceOf(address(standardVault)));
+        uint64 predepositVaultImpl = uint64(IContractId(address(predepositVault)).ID());
 
         vm.prank(vaultOwner);
-        factory.upgrade(address(standardVault), 2, upgradeData);
+        factory.upgrade(address(standardVault), predepositVaultImpl, upgradeData);
 
         ConcretePredepositVaultImpl predepositVault = ConcretePredepositVaultImpl(address(standardVault));
 
@@ -278,6 +286,7 @@ contract UpgradeToPredeposit is ConcretePredepositVaultImplBaseSetup {
         predepositVault.allocate(abi.encode(params));
 
         // Accrue yield to update cached values (selfClaimsEnabled is false by default after upgrade)
+        vm.prank(allocator);
         predepositVault.accrueYield();
 
         // Verify allocation worked - assets should still be tracked since they're in the strategy
@@ -287,24 +296,27 @@ contract UpgradeToPredeposit is ConcretePredepositVaultImplBaseSetup {
     }
 
     function test_cannotUpgradeToInvalidVersion() public {
-        // Try to upgrade to a non-existent version through factory
+        // Try to upgrade to a non-existent vault ID through factory
         bytes memory upgradeData = "";
+        // Use an invalid vault ID that doesn't exist
+        uint64 invalidVaultImpl = 999999999;
 
         vm.expectRevert();
         vm.prank(vaultOwner);
-        factory.upgrade(address(standardVault), 999, upgradeData);
+        factory.upgrade(address(standardVault), invalidVaultImpl, upgradeData);
     }
 
     function test_upgradeRequiresOwner() public {
-        bytes memory upgradeData = "";
+        bytes memory upgradeData = abi.encode(asset.balanceOf(address(standardVault)));
+        uint64 predepositVaultImpl = uint64(IContractId(address(predepositVault)).ID());
 
         // Non-owner cannot upgrade through factory
         vm.expectRevert();
         vm.prank(user1);
-        factory.upgrade(address(standardVault), 2, upgradeData);
+        factory.upgrade(address(standardVault), predepositVaultImpl, upgradeData);
 
         // Owner can upgrade through factory
         vm.prank(vaultOwner);
-        factory.upgrade(address(standardVault), 2, upgradeData);
+        factory.upgrade(address(standardVault), predepositVaultImpl, upgradeData);
     }
 }

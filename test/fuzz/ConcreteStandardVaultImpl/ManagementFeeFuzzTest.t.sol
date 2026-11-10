@@ -10,8 +10,10 @@ import {
     ConcreteStandardVaultImplBaseSetup
 } from "../../common/ConcreteStandardVaultImplBaseSetup.t.sol";
 
+import {ConcreteV2RolesLib as RolesLib} from "../../../src/lib/Roles.sol";
 import {InvariantUtils} from "../../invariant/helpers/InvariantUtils.sol";
 import {Math} from "@openzeppelin-contracts/utils/math/Math.sol";
+import {IContractId} from "../../../src/interface/IContractId.sol";
 
 contract ManagementFeeFuzzTest is ConcreteStandardVaultImplBaseSetup {
     address public user1;
@@ -31,18 +33,23 @@ contract ManagementFeeFuzzTest is ConcreteStandardVaultImplBaseSetup {
         managementFee = uint16(bound(managementFee, 1, 1000)); // 0.01% to 10% (max allowed)
 
         // Set up fresh vault with new parameters
+        uint64 vaultImpl = uint64(IContractId(address(concreteStandardVaultImpl)).ID());
         ConcreteStandardVaultImpl newVault = ConcreteStandardVaultImpl(
             factory.create(
-                1, vaultManager, abi.encode(address(allocateModule), address(asset), vaultManager, "Test Vault", "TV")
+                vaultImpl,
+                vaultManager,
+                abi.encode(address(allocateModule), address(asset), vaultManager, "Test Vault", "TV")
             )
         );
+        vm.prank(vaultManager);
+        newVault.grantRole(RolesLib.ALLOCATOR, vaultManager);
 
         // Set management fee
         vm.prank(factoryOwner);
         newVault.updateManagementFeeRecipient(managementFeeRecipient);
 
         vm.prank(vaultManager);
-        newVault.updateManagementFee(managementFee);
+        newVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.ManagementFee, abi.encode(managementFee));
 
         // Make initial deposit
         asset.mint(user1, initialDeposit);
@@ -56,7 +63,7 @@ contract ManagementFeeFuzzTest is ConcreteStandardVaultImplBaseSetup {
         // Skip time
         vm.warp(block.timestamp + timeElapsed);
 
-        (,, uint32 lastAccrual) = newVault.managementFee();
+        (,, uint32 lastAccrual,,) = newVault.getFeeConfig();
         uint256 annualFeeAmount = (newVault.cachedTotalAssets() * managementFee) / 10_000;
         uint256 expectedFeeAmount = (annualFeeAmount * (block.timestamp - lastAccrual)) / 365 days;
         uint256 expectedShares = InvariantUtils.convertToShares(
@@ -67,6 +74,7 @@ contract ManagementFeeFuzzTest is ConcreteStandardVaultImplBaseSetup {
         );
 
         // Accrue yield and verify
+        vm.prank(vaultManager);
         newVault.accrueYield();
         uint256 actualShares = newVault.balanceOf(managementFeeRecipient);
         assertEq(actualShares, expectedShares);
@@ -74,7 +82,7 @@ contract ManagementFeeFuzzTest is ConcreteStandardVaultImplBaseSetup {
         timeElapsed = bound(timeElapsed, 1 seconds, 2 * 365 days);
         vm.warp(block.timestamp + timeElapsed);
 
-        (,, lastAccrual) = newVault.managementFee();
+        (,, lastAccrual,,) = newVault.getFeeConfig();
         annualFeeAmount = (newVault.cachedTotalAssets() * managementFee) / 10_000;
         expectedFeeAmount = (annualFeeAmount * (block.timestamp - lastAccrual)) / 365 days;
         expectedShares = InvariantUtils.convertToShares(
@@ -86,6 +94,7 @@ contract ManagementFeeFuzzTest is ConcreteStandardVaultImplBaseSetup {
         uint256 recipientSharesBefore = newVault.balanceOf(managementFeeRecipient);
 
         // Accrue yield and verify
+        vm.prank(vaultManager);
         newVault.accrueYield();
         actualShares = newVault.balanceOf(managementFeeRecipient);
         assertEq(actualShares, recipientSharesBefore + expectedShares);

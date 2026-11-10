@@ -173,4 +173,3 @@ contract ShareDistributor is OAppUpgradeable {
         IERC20(targetVault).transfer(msg.sender, amount);
     }
 }
-

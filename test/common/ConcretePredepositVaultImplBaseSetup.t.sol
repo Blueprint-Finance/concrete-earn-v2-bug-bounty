@@ -19,6 +19,7 @@ import {TestHelperOz5} from "@layerzerolabs/test-devtools-evm-foundry/contracts/
 import {ShareDistributorMock} from "../mock/ShareDistributorMock.sol";
 import {ConcreteStandardVaultImpl} from "../../src/implementation/ConcreteStandardVaultImpl.sol";
 import {ERC1967Proxy} from "@openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {IContractId} from "../../src/interface/IContractId.sol";
 
 contract ConcretePredepositVaultImplBaseSetup is TestBaseSetup, TestHelperOz5 {
     uint32 public aEid = 1;
@@ -63,14 +64,19 @@ contract ConcretePredepositVaultImplBaseSetup is TestBaseSetup, TestHelperOz5 {
         allocateModule = new AllocateModule();
 
         // Deploy and approve predeposit vault implementation
+        ConcretePredepositVaultImpl predepositVaultImpl = new ConcretePredepositVaultImpl(address(factory));
         vm.startPrank(factoryOwner);
-        factory.approveImplementation(address(new ConcretePredepositVaultImpl(address(factory))));
+        factory.approveImplementation(address(predepositVaultImpl));
         vm.stopPrank();
+
+        // Get vault IDs
+        uint64 predepositVaultUint64 = uint64(IContractId(address(predepositVaultImpl)).ID());
+        uint64 standardVaultUint64 = uint64(IContractId(address(concreteStandardVaultImpl)).ID());
 
         // Deploy vault on chain A
         predepositVault = ConcretePredepositVaultImpl(
             factory.create(
-                2,
+                predepositVaultUint64,
                 vaultOwner,
                 abi.encode(address(allocateModule), address(asset), vaultManager, "Concrete Predeposit Vault A", "CPVA")
             )
@@ -89,7 +95,7 @@ contract ConcretePredepositVaultImplBaseSetup is TestBaseSetup, TestHelperOz5 {
         // Deploy vault on chain B
         destinationVault = ConcreteStandardVaultImpl(
             factory.create(
-                1,
+                standardVaultUint64,
                 vaultOwner,
                 abi.encode(address(allocateModule), address(asset), vaultManager, "Concrete Standard Vault B", "CSVB")
             )

@@ -3,6 +3,11 @@ pragma solidity ^0.8.24;
 
 import {IERC4626} from "@openzeppelin-contracts/interfaces/IERC4626.sol";
 
+/**
+ * @title IConcreteTokenizedVault
+ * @notice Historical snapshot interface. Not implemented by any current Concrete vault; kept only so that
+ *         existing imports of this file keep compiling. Do not rely on these functions being available.
+ */
 interface IConcreteTokenizedVault is IERC4626 {
     function totalAssetsAt(uint32 timestamp) external view returns (uint256);
 

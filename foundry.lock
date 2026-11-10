@@ -1,0 +1,11 @@
+{
+  "lib/clones-with-immutable-args": {
+    "tag": {
+      "name": "v1.0.0",
+      "rev": "5950723ffcfa047f13262e5dbd7218b54360c42e"
+    }
+  },
+  "lib/forge-std": {
+    "rev": "60acb7aaadcce2d68e52986a0a66fe79f07d138f"
+  }
+}

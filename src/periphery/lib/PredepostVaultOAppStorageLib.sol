@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.27;
 
 library PredepostVaultOAppStorageLib {
     /// @dev keccak256(abi.encode(uint256(keccak256("concrete.storage.PredepostVaultOAppStorage")) - 1)) & ~bytes32(uint256(0xff))

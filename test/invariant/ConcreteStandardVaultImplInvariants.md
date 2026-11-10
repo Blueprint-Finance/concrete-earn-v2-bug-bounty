@@ -17,25 +17,35 @@ previewAccrueYield() >= previewRedeem(totalSupply())
 
 This fundamental safety invariant ensures that the vault can always cover the redemption of all outstanding shares, using `previewAccrueYield()` to account for unrealized yields and losses from strategies.
 
-### 2. Asset Conservation Invariants
+### 2. Deallocation Order Invariant (`invariant_deallocation_order_subset_of_strategies`)
+
+**Every strategy in the deallocation order must exist in the vault's strategies set.**
+
+```solidity
+∀ strategy ∈ deallocationOrder: strategy ∈ strategies
+```
+
+This invariant is maintained by `removeStrategy()` which automatically updates `deallocationOrder` when a strategy is removed. `WithdrawLib` reverts with `StaleDeallocationOrder` if the invariant is violated (defense in depth).
+
+### 3. Asset Conservation Invariants
 
 These invariants ensure perfect accounting of all vault assets.
 
-#### 2.1 Total Asset Accounting (`invariant_asset_conservation`)
+#### 3.1 Total Asset Accounting (`invariant_asset_conservation`)
 ```solidity
 // The vault's total assets must equal idle assets plus all strategy allocations
 totalAssets() == IERC20(asset()).balanceOf(address(vault)) + getTotalAllocated()
 ```
 
-#### 2.2 Strategy Allocation Bounds (`invariant_strategy_allocation_bounds`)
+#### 3.2 Strategy Allocation Bounds (`invariant_strategy_allocation_bounds`)
 ```solidity
 // Sum of all strategy allocations cannot exceed total vault assets
 getTotalAllocated() <= totalAssets()
 ```
 
-### 3. ERC4626 Compliance Invariants
+### 4. ERC4626 Compliance Invariants
 
-#### 3.1 Max Function Accuracy (`invariant_erc4626_max_functions`)
+#### 4.1 Max Function Accuracy (`invariant_erc4626_max_functions`)
 ```solidity
 // Max functions must respect actual liquidity constraints
 maxRedeem(user) == convertToShares(min(userAssets, availableLiquidity()))
@@ -47,7 +57,7 @@ where:
 
 This ensures that `maxRedeem()` reflects real withdrawal constraints, not just user balances.
 
-### 4. Strategy Yield Accrual Synchronization (`invariant_strategy_yield_accrual_sync`)
+### 5. Strategy Yield Accrual Synchronization (`invariant_strategy_yield_accrual_sync`)
 
 ```solidity
 // After yield accrual, strategy allocated amounts should match reported values

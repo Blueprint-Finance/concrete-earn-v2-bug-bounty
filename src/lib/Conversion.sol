@@ -32,8 +32,8 @@ library ConcreteV2ConversionLib {
     ) internal pure returns (uint256 assets) {
         // setting uint256 decimalsOffset = 0;
         assets = shares.mulDiv(
-            _totalAssets + 1, // + 10 ** decimalsOffset = 1
-            _totalSupply + 1,
+            _totalAssets + 1,
+            _totalSupply + 1, // + 10 ** decimalsOffset = 1
             rounding
         );
         if (safeMode && assets == 0) revert IConcreteStandardVaultImpl.InsufficientAssets();

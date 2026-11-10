@@ -12,17 +12,27 @@
     - [2.4.2 ConcreteAsyncVaultImpl](#242-concreteasyncvaultimpl)
     - [2.4.3 ConcreteBridgedAsyncVaultImpl](#243-concretebridgedasyncvaultimpl)
     - [2.4.4 ConcretePredepositVaultImpl](#244-concretepredepositvaultimpl)
+    - [2.4.5 ConcreteMultiAssetDepositAsyncVault](#245-concretemultiassetdepositasyncvault)
   - [2.5 Periphery Unit Tests](#25-periphery-unit-tests)
     - [2.5.1 FeeSplitter](#251-feesplitter)
     - [2.5.2 Hooks](#252-hooks)
     - [2.5.3 SimpleStrategy](#253-simplestrategy)
     - [2.5.4 MultisigStrategy](#254-multisigstrategy)
     - [2.5.5 ShareDistributor](#255-sharedistributor)
+    - [2.5.6 Hook Contracts](#256-hook-contracts)
+    - [2.5.7 Looping and Position Helpers](#257-looping-and-position-helpers)
+    - [2.5.8 Oracles](#258-oracles)
+    - [2.5.9 PeripheryFactory](#259-peripheryfactory)
+    - [2.5.10 Timelock](#2510-timelock)
+    - [2.5.11 FeeAccountant](#2511-feeaccountant)
+  - [2.6 Libraries, Access Control and Pricers](#26-libraries-access-control-and-pricers)
 - [3. Fuzz Testing](#3-fuzz-testing)
   - [3.1 Overview](#31-overview)
   - [3.2 AllocateModule Fuzz Tests](#32-allocatemodule-fuzz-tests)
   - [3.3 ConcreteStandardVaultImpl Fuzz Tests](#33-concretestandardvaultimpl-fuzz-tests)
   - [3.4 Invariant Testing](#34-invariant-testing)
+  - [3.5 Hurdle Rate Oracle Fuzz Tests](#35-hurdle-rate-oracle-fuzz-tests)
+  - [3.6 Property Tests](#36-property-tests)
 - [4. End-to-End Testing](#4-end-to-end-testing)
   - [4.1 Overview](#41-overview)
   - [4.2 Core Strategy Management Tests](#42-core-strategy-management-tests)
@@ -242,6 +252,10 @@ The repository is divided into **core** and **periphery**, each with its own tes
   - `ConcreteAsyncVaultImpl/` - Async vault implementation tests
   - `ConcreteBridgedAsyncVaultImpl/` - Bridged async vault implementation tests
   - `ConcretePredepositVaultImpl/` - Predeposit vault implementation tests
+  - `ConcreteBridgedStandardVaultImpl/` - Bridged standard vault implementation tests
+  - `ConcreteMultiAssetDepositAsyncVault/` - Multi-asset deposit vault tests
+  - `Libraries/`, `OneToOneAssetPricer/`, `OracleAssetPricer/` - Library and asset pricer tests
+  - `AccessControlDefaultAdminRulesEnumerable*.t.sol` - Access control base contract tests
 
 - **Periphery unit tests**: `test/periphery/unit-test/`
   - `FeeSplitterTest.t.sol` - Fee splitting functionality tests
@@ -249,6 +263,12 @@ The repository is divided into **core** and **periphery**, each with its own tes
   - `SimpleStrategyUnitTest.t.sol` - Simple strategy tests
   - `MultisigStrategyUnitTest.t.sol` - Multisig strategy tests
   - `ShareDistributorTest.t.sol` - Share distribution tests
+  - Hook contracts: `HookContainer`, `UserDepositCapHook`, `WhitelistUserDepositHook`, `DepositLock*Hook`, `MultiAssetDepositCapHook`
+  - Looping and position helpers: `BaseLoopingStrategyTest`, `AaveV3LenderAdapterTest`, `PositionHelper*Test`, `PositionManagementHelperLibTest`
+  - Oracles: `OracleModule*`, `OffchainHurdleRateOracleTest`
+  - Factory, timelock and fees: `PeripheryFactory*`, `TimelockTest`, `FeeAccountantTest`, `*RealTimelockTest`
+
+Tests named `*RealTimelockTest` run against a deployed `Timelock` (proposal, delay, execution); `*TimelockTest` cover the timelock wiring of a single contract.
 
 ---
 
@@ -275,6 +295,31 @@ forge test --match-path test/unit-test/factory/ConcreteFactoryUnitTest.t.sol
 
 ---
 
+##### ConcreteFactoryTimelockTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/factory/ConcreteFactoryTimelockTest.t.sol
+```
+
+**Tests:**
+- Setting and activating the timelock; activating twice reverts (`testSetTimelock`, `testActivateTimelock`, `testActivateTimelockRevertsIfAlreadyActive`)
+- Gated calls revert without a proposal or before the delay, and pass before activation (`testTimelockGatedTransferOwnership`, `testTimelockGatedFunctionRevertsBeforeDelay`, `testTimelockGatedFunctionRevertsWithoutProposal`, `testGatedFunctionPassesBeforeTimelockActivated`)
+
+##### ConcreteFactoryRealTimelockTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/factory/ConcreteFactoryRealTimelockTest.t.sol
+```
+
+**Tests:**
+- Artifacts registered in the timelock (`testArtifactsRegistered`)
+- Pause by the factory manager is instant and blocks `create`; unpause needs a TIER_3 proposal (`testPause_byManager_immediate`, `testCreate_revertsWhenPaused`, `testTier3_unpause_afterDelay`)
+- Ownership transfer (TIER_1) and default fee recipients (TIER_2) after delay; unblocking needs a proposal (`testTier1_transferOwnership_afterDelay`, `testTier2_setDefaultEnforcedVaultConfiguration_afterDelay`, `testUnblockImplementation_revertsWithoutProposal`)
+
+---
+
 ### 2.3 Upgradeable Vault Unit Tests
 
 **File**: `test/unit-test/UpgradeableVault/UpgradeableVaultUnitTest.t.sol`
@@ -298,7 +343,7 @@ forge test --match-path test/unit-test/UpgradeableVault/UpgradeableVaultUnitTest
 
 **Run all tests**:
 ```bash
-forge test --match-path test/unit-test/ConcreteStandardVaultImpl/
+forge test --match-path 'test/unit-test/ConcreteStandardVaultImpl/**'
 ```
 
 ##### InitializationUnitTest.t.sol
@@ -379,6 +424,38 @@ forge test --match-path test/unit-test/ConcreteStandardVaultImpl/UserInteraction
 
 ---
 
+##### DerivedFloatingUnitTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/ConcreteStandardVaultImpl/DerivedFloatingUnitTest.t.sol
+```
+
+**Tests:**
+- Donations do not change the derived floating amount or allocation limits (`test_donation_doesNotAffectAccounting`, `test_withdraw_ignoresDonation_whenFullyAllocated`, `test_allocate_revertsWhenExceedingIdle_withDonation`, `test_allocate_uptoIdle_succeeds_withDonation`)
+
+##### MaxMintRedeemViewAccuracy.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/ConcreteStandardVaultImpl/MaxMintRedeemViewAccuracy.t.sol
+```
+
+**Tests:**
+- `maxMint` / `maxRedeem` amounts are accepted by `mint` / `redeem`, and return 0 when the round trip falls below the minimum (`testMintMaxMintSucceedsAtPar`, `testMaxMintReturnsZeroWhenRoundTripFallsBelowMinTx`, `testRedeemMaxRedeemSucceedsAtPar`, `testMaxRedeemReturnsZeroWhenClampedRoundTripFallsBelowMinTx`)
+
+##### StandardVaultRealTimelockTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/ConcreteStandardVaultImpl/StandardVaultRealTimelockTest.t.sol
+```
+
+**Tests:**
+- Ownership transfer and `VAULT_MANAGER` grants at TIER_1, `configure` and `STRATEGY_MANAGER` grants at TIER_2, reverts before the delay or without a proposal
+
+---
+
 #### 2.4.2 ConcreteAsyncVaultImpl
 
 **File**: `test/unit-test/ConcreteAsyncVaultImpl/QueueUnitTest.t.sol`
@@ -401,6 +478,51 @@ forge test --match-path test/unit-test/ConcreteAsyncVaultImpl/QueueUnitTest.t.so
 - **Access control**: Withdrawal manager role enforcement (`testProcessEpochUnauthorized`, `testToggleQueueActiveUnauthorized`, `testMoveRequestToNextEpochUnauthorized`, `testClaimUsersBatchUnauthorized`)
 - **Allowance handling**: Spending allowances for third-party withdrawal initiation (`testWithdrawSpendAllowance`, `testWithdrawSpendAllowanceQueueDisabled`)
 - **Zero address validation**: Preventing operations with zero addresses (`testClaimWithdrawalZeroAddress`, `testCancelRequestZeroAddress`, `testMoveRequestToNextEpochZeroAddress`)
+
+---
+
+##### PriorityWithdrawalUnitTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/ConcreteAsyncVaultImpl/PriorityWithdrawalUnitTest.t.sol
+```
+
+**Tests:**
+- Full and partial priority withdrawals, in one or two steps (`test_PriorityWithdrawal_ShouldSuccess`, `test_PriorityWithdrawal_PartialWithdrawal`, `test_PartialPriorityWithdrawal_ProcessIn2Steps`)
+- Unwind cost cap, input validation, halted strategy and insufficient balance (`test_PriorityWithdrawal_UnwindCostTooHigh`, `test_PriorityWithdrawal_InputValidation`, `test_PriorityWithdrawal_RevertsOnHaltedStrategy`, `test_PriorityWithdrawal_InsufficientBalance*`)
+- Exchange rate effects, including with a multisig strategy (`test_PriorityWithdrawal_WithPenaltyFee_IncreasesExchangeRate`, `test_PriorityWithdrawal_ExchangeRate_WithMultisigStrategy`)
+- Unwind cost cap getter/setter access control (`test_UnwindCostCap_GetterSetter_Unauthorized`)
+
+##### PartialEpochProcessingE2E.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/ConcreteAsyncVaultImpl/PartialEpochProcessingE2E.t.sol
+```
+
+**Tests:**
+- Scenarios combining partial processing, moving requests and batch processing of the remainder (`test_PartialProcessSingleRequest_ThenBatchRemainder`, `test_MoveRequests_ProcessOneIndividually_BatchRest`, `test_PartialProcess_MoveRemaining_AdvanceEpoch_CloseThenProcess`, `test_SteadyState_ThreeDayCadence`)
+
+##### UpgradeToAsync.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/ConcreteAsyncVaultImpl/UpgradeToAsync.t.sol
+```
+
+**Tests:**
+- Standard → Async upgrade initialises the async state; Async → Async does not re-initialise it; legacy vault-manager admin roles are migrated
+
+##### AsyncVaultTimelockTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/ConcreteAsyncVaultImpl/AsyncVaultTimelockTest.t.sol
+```
+
+**Tests:**
+- Timelock setup and gated `transferOwnership` / `setUnwindCostCap`; gated calls revert without a proposal
 
 ---
 
@@ -430,7 +552,7 @@ forge test --match-path test/unit-test/ConcreteBridgedAsyncVaultImpl/UnbackedMin
 
 **Run all tests**:
 ```bash
-forge test --match-path test/unit-test/ConcretePredepositVaultImpl/
+forge test --match-path 'test/unit-test/ConcretePredepositVaultImpl/**'
 ```
 
 ##### Files:
@@ -445,6 +567,72 @@ forge test --match-path test/unit-test/ConcretePredepositVaultImpl/
 - Withdrawal lock mechanisms and permissions
 - Self-claims toggle functionality
 - Upgrade path validation from standard to predeposit vault
+
+---
+
+#### 2.4.5 ConcreteMultiAssetDepositAsyncVault
+
+**Directory**: `test/unit-test/ConcreteMultiAssetDepositAsyncVault/`
+
+**Run all tests**:
+```bash
+forge test --match-path 'test/unit-test/ConcreteMultiAssetDepositAsyncVault/**'
+```
+
+##### MultiAssetAdminUnitTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/ConcreteMultiAssetDepositAsyncVault/MultiAssetAdminUnitTest.t.sol
+```
+
+**Tests:**
+- Whitelisting and removing deposit assets, including base asset, share token and zero address rejections
+- Setting the pricer and the multi-asset strategy (must be registered and active; can be repointed)
+- Only the vault manager can configure or remove assets
+
+##### MultiAssetDepositUnitTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/ConcreteMultiAssetDepositAsyncVault/MultiAssetDepositUnitTest.t.sol
+```
+
+**Tests:**
+- Base-asset deposits through the overload follow the inherited ERC-4626 flow, including pause and preview
+
+##### MultiAssetNonBaseDepositUnitTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/ConcreteMultiAssetDepositAsyncVault/MultiAssetNonBaseDepositUnitTest.t.sol
+```
+
+**Tests:**
+- Non-base deposits mint shares, forward the token to the strategy and emit `MultiAssetDeposit` and `Deposit`
+- Shares match an equivalent base deposit, previews match, no phantom yield, decimal scaling
+- Reverts for unlisted assets, zero value, halted strategy, unset pricer or strategy
+- The strategy pointer follows `removeStrategy`, `reconcileHaltedStrategy` and halting
+
+##### MultiAssetOraclePricerUnitTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/ConcreteMultiAssetDepositAsyncVault/MultiAssetOraclePricerUnitTest.t.sol
+```
+
+**Tests:**
+- Shares follow the oracle price ratio and base price moves; decimal differences and rounding down
+
+##### MultiAssetVaultRealTimelockTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/ConcreteMultiAssetDepositAsyncVault/MultiAssetVaultRealTimelockTest.t.sol
+```
+
+**Tests:**
+- `configureMultiAsset` is TIER_2 and needs a proposal; `removeWhitelistedAsset` is instant
 
 ---
 
@@ -552,6 +740,341 @@ forge test --match-path test/periphery/unit-test/ShareDistributorTest.t.sol
 
 ---
 
+#### 2.5.6 Hook Contracts
+
+**Run all tests**:
+```bash
+forge test --match-path 'test/periphery/unit-test/*Hook*.t.sol'
+```
+
+##### HookContainer.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/HookContainer.t.sol
+```
+
+**Tests:**
+- Initialisation, role enumeration, adding/removing/replacing sub-hooks with all validation cases, views
+- Combined whitelist and cap enforcement through the container
+
+##### HookContainerRealTimelockTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/HookContainerRealTimelockTest.t.sol
+```
+
+**Tests:**
+- `addHook` / `removeHook` through real timelock proposals (TIER_2), including `reinitializeV3` wiring
+
+##### UserDepositCapHook.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/UserDepositCapHook.t.sol
+```
+
+**Tests:**
+- Per-user cap on deposit and mint, multiple users, infinite cap, withdrawals unaffected
+
+##### WhitelistUserDepositHook.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/WhitelistUserDepositHook.t.sol
+```
+
+**Tests:**
+- Whitelisting and removing users, deposits and mints only for whitelisted users within the cap
+
+##### DepositLockHook.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/DepositLockHook.t.sol
+```
+
+**Tests:**
+- Locks created on deposit block transfers and redemptions until expiry; received shares stay free
+- Lock duration changes, compaction and the invariant that locked shares never exceed the balance (including fuzz tests)
+- Admin setters, caller restrictions, overflow guards and hook container calls
+
+##### DepositLockWithFeeHook.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/DepositLockWithFeeHook.t.sol
+```
+
+**Tests:**
+- Early unlock fee over time (max at creation, minimal near expiry), FIFO consumption, preview matches actual
+- Fee parameters, minimum lock period, enable/disable and validation
+
+##### DepositLockRegSHook.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/DepositLockRegSHook.t.sol
+```
+
+**Tests:**
+- Hard lock, Reg S window (redeem allowed, transfer blocked) and full unlock
+- Successor/legacy hook migration and disconnecting the legacy hook
+- Guard against vaults with cancellation enabled; redemption consuming locks across multiple deposits
+
+##### MultiAssetDepositCapHook.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/MultiAssetDepositCapHook.t.sol
+```
+
+**Tests:**
+- Per-token cap encoding (unset = uncapped), rolling sum per token in token decimals, base deposits ignored
+- Deposits at, above and below the cap; lowering the cap closes a token; container forwarding and bypass protection
+
+---
+
+#### 2.5.7 Looping and Position Helpers
+
+Some of these are fork tests and need `MAINNET_RPC_URL` (see [4.1](#41-overview)).
+
+##### BaseLoopingStrategyTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/BaseLoopingStrategyTest.t.sol
+```
+
+**Tests:**
+- Allocation and deallocation with and without looping, leverage adjustments (permissioned and permissionless), full position withdrawal
+- `previewOperation` for all supply/withdraw combinations, `maxWithdraw` edge cases, timelock setup
+
+##### AaveV3LenderAdapterTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/AaveV3LenderAdapterTest.t.sol
+```
+
+**Tests:**
+- Supply, withdraw, borrow and repay through Aave V3, pool liquidity and access control
+
+##### PositionHelperAaveV3Test.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/PositionHelperAaveV3Test.t.sol
+```
+
+**Tests:**
+- Fork tests: deployment and approvals, supply/borrow/repay/withdraw, `deploy` / `retract` flows to a target LTV, self-liquidation and redemption requests
+
+##### PositionHelperMorphoTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/PositionHelperMorphoTest.t.sol
+```
+
+**Tests:**
+- Fork tests: the same flows as the Aave V3 helper against a Morpho market
+
+##### PositionHelperDolomiteTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/PositionHelperDolomiteTest.t.sol
+```
+
+**Tests:**
+- Fork tests: the same flows for `PositionHelperDolomiteNative`, including market validation
+
+##### PositionManagementHelperLibTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/PositionManagementHelperLibTest.t.sol
+```
+
+**Tests:**
+- Every math helper (`withdrawable`, `minLtv`, `borrowAmountForTargetLtv`, `repayAmountForTargetLtv`, `redepositAmount`, flash-withdraw amounts) including zero and edge cases
+
+---
+
+#### 2.5.8 Oracles
+
+##### OracleModule.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/OracleModule.t.sol
+```
+
+**Tests:**
+- Setting and removing feeds with all validation cases, price bounds, staleness, decimals, multiple assets
+
+##### OracleModuleSequencerTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/OracleModuleSequencerTest.t.sol
+```
+
+**Tests:**
+- L2 sequencer check: down sequencer, grace period, invalid rounds, configuration
+
+##### OracleModuleRealTimelockTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/OracleModuleRealTimelockTest.t.sol
+```
+
+**Tests:**
+- `setOracle` / `setSequencerOracle` / `transferOwnership` (TIER_2) and `setTimelock` (TIER_1) through proposals, `removeOracle` instant, two-step ownership
+
+##### OffchainHurdleRateOracleTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/OffchainHurdleRateOracleTest.t.sol
+```
+
+**Tests:**
+- Setting the rate with bounds and access control, precision, staleness revert and reset
+
+---
+
+#### 2.5.9 PeripheryFactory
+
+##### PeripheryFactoryUnitTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/PeripheryFactoryUnitTest.t.sol
+```
+
+**Tests:**
+- Approving, blocking and unblocking strategy, PMH and hook implementations; migration paths
+- Deploying, registering, upgrading and deregistering strategies; cloning PMHs and hooks; factory upgrades and access control
+
+##### PeripheryFactoryTimelockTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/PeripheryFactoryTimelockTest.t.sol
+```
+
+**Tests:**
+- Timelock wiring of approvals, migrations, ownership transfer and factory upgrades
+
+##### PeripheryFactoryRealTimelockTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/PeripheryFactoryRealTimelockTest.t.sol
+```
+
+**Tests:**
+- Pause blocks deployments and clones; unpause (TIER_3), approvals (TIER_2), ownership (TIER_1) and unblocking through proposals
+
+---
+
+#### 2.5.10 Timelock
+
+**File**: `test/periphery/unit-test/TimelockTest.t.sol`
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/TimelockTest.t.sol
+```
+
+**Tests:**
+- Action IDs, proposals and the tier each protected selector or role grant resolves to
+- Delay checks, cancel, override, pruning of stale entries, tier configuration, contract bindings and role management
+
+##### MultisigStrategyRealTimelockTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/MultisigStrategyRealTimelockTest.t.sol
+```
+
+**Tests:**
+- `setMultiSig` (TIER_1) and accounting parameters (TIER_2) through proposals
+
+---
+
+#### 2.5.11 FeeAccountant
+
+**File**: `test/periphery/unit-test/FeeAccountantTest.t.sol`
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/unit-test/FeeAccountantTest.t.sol
+```
+
+**Tests:**
+- Initialisation, recipient whitelist, distributor role, distributions with validation, token rescue and upgrades
+
+---
+
+### 2.6 Libraries, Access Control and Pricers
+
+##### ContractIdEncoding.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/Libraries/ContractIdEncoding.t.sol
+```
+
+**Tests:**
+- Encoding and decoding contract IDs, including fuzzed round trips and invalid inputs
+
+##### AccessControlDefaultAdminRulesEnumerable.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/AccessControlDefaultAdminRulesEnumerable.t.sol
+```
+
+**Tests:**
+- Two-step default admin transfer with delay, role grants and revocations with enumeration
+
+##### AccessControlDefaultAdminRulesEnumerableUpgradeable.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/AccessControlDefaultAdminRulesEnumerableUpgradeable.t.sol
+```
+
+**Tests:**
+- The same for the upgradeable variant, including initializer protection
+
+##### OneToOneAssetPricerUnitTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/OneToOneAssetPricer/OneToOneAssetPricerUnitTest.t.sol
+```
+
+**Tests:**
+- Decimal scaling up and down with rounding, including fuzz tests
+
+##### OracleAssetPricerUnitTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/unit-test/OracleAssetPricer/OracleAssetPricerUnitTest.t.sol
+```
+
+**Tests:**
+- Price ratio between deposit and base asset, decimals, rounding down, never over-valuing (fuzz), missing or stale feeds
+
+---
+
 ## 3. Fuzz Testing
 
 ### 3.1 Overview
@@ -604,7 +1127,7 @@ forge test --match-path test/fuzz/AllocateModule/AllocateModuleFuzzTest.t.sol
 
 **Run all tests**:
 ```bash
-forge test --match-path test/fuzz/ConcreteStandardVaultImpl/
+forge test --match-path 'test/fuzz/ConcreteStandardVaultImpl/**'
 ```
 
 #### ManagementFeeFuzzTest.t.sol
@@ -671,6 +1194,18 @@ forge test --match-path test/fuzz/ConcreteStandardVaultImpl/ConcreteStandardVaul
     - Withdrawal limits are properly enforced
     - On-behalf-of withdrawals handle allowances correctly
     - Share and asset accounting remains consistent across all scenarios
+
+---
+
+##### HurdleRatePerformanceFeeFuzzTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/fuzz/ConcreteStandardVaultImpl/HurdleRatePerformanceFeeFuzzTest.t.sol
+```
+
+**Tests:**
+- Fee only on yield above the hurdle, none below it, lower than without hurdle, exchange rate matches the hurdle at 100% fee
 
 ---
 
@@ -827,6 +1362,43 @@ where:
 
 ---
 
+### 3.5 Hurdle Rate Oracle Fuzz Tests
+
+##### APRRateHurdleOracleFuzzTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/fuzz/APRRateHurdleOracleFuzzTest.t.sol
+```
+
+**Tests:**
+- Rate matches direct computation and the Python reference, monotonicity, continuous compounding ≥ APY, gas usage over time
+
+##### APYRateHurdleOracleFuzzTest.t.sol
+
+**Run tests**:
+```bash
+forge test --match-path test/periphery/fuzz/APYRateHurdleOracleFuzzTest.t.sol
+```
+
+**Tests:**
+- The same for the APY oracle, and APY ≤ APR
+
+---
+
+### 3.6 Property Tests
+
+**Directory**: `test/property/`
+
+**Run tests**:
+```bash
+forge test --match-path 'test/property/**'
+```
+
+`A16zPropertyTestsConcreteStandardVaultImpl.t.sol` and `A16zPropertyTestsConcreteTokenizedVault.t.sol` run the a16z ERC-4626 property suite and Concrete-specific properties (`test/property/common/`) against the standard vault. The tests are inherited, so the files themselves contain no test functions. They are not selected by the `invariant` profile, which only matches `invariant_*`.
+
+---
+
 ## 4. End-to-End Testing
 
 ### 4.1 Overview
@@ -851,6 +1423,11 @@ End-to-End (E2E) tests validate complete user scenarios and workflows by testing
 - **Periphery E2E**: `test/periphery/E2E/`
 
 ---
+
+**Fork tests** (files marked *fork*, and some periphery unit tests) need a mainnet RPC:
+```bash
+export MAINNET_RPC_URL=<your mainnet RPC URL>
+```
 
 ### 4.2 Core Strategy Management Tests
 
@@ -944,6 +1521,18 @@ forge test --match-path test/E2E/WithdrawFromAllocatedVaultE2ETest.t.sol
 
 ---
 
+##### FactoryUpgradeToExplicitVersioning.t.sol (fork)
+
+**Tests:**
+- Upgrading the deployed factory keeps existing vaults upgradeable and changes address prediction
+
+##### RoleMigrationForkTest.t.sol (fork)
+
+**Tests:**
+- Role migration from the legacy admin roles to `ROLE_ADMIN` on upgrade
+
+---
+
 ### 4.4 Fee Tests
 
 #### ManagementFeeAccrualE2ETest.t.sol
@@ -989,6 +1578,13 @@ forge test --match-path test/E2E/PerformanceFeeE2ETest.t.sol
 - **Deposit triggers accrual**: Deposits trigger yield accrual and performance fee calculation (`testPerformanceFeeOnDepositTriggersYieldAccrual`)
 - **Loss scenarios**: No performance fees charged when strategy has losses (`testPerformanceFeeWithStrategyLoss`)
 - **Net positive yield**: Performance fees on net positive yield after previous loss (`testPerformanceFeeOnNetPositiveYieldAfterLoss`)
+
+---
+
+##### HurdleRatePerformanceFeeE2ETest.t.sol / HurdleRatePerformanceFee6DecimalsE2ETest.t.sol
+
+**Tests:**
+- Performance fee with the hurdle above, at and below the share price, over several accruals, unset oracle, 100% fee tracking the hurdle, 6-decimal assets
 
 ---
 
@@ -1079,6 +1675,18 @@ forge test --match-path test/periphery/E2E/MultisigStrategyE2ETest.t.sol
 
 ---
 
+##### Fork tests (`test/periphery/E2E/`)
+
+These need `MAINNET_RPC_URL`.
+
+- `LoopingStrategyE2EForkTest.t.sol`: looping strategy allocation, enabling looping, winding up and down, max deallocation
+- `PositionHelperAaveV3E2ETest.t.sol`: withdrawal requests cascading from a collateral vault through the position helper to the yield vault
+- `PositionHelperLiquidationE2ETest.t.sol`: self-liquidation by debt amount and to a target LTV, approval checks
+- `SwapModuleUniV3E2EForkTest.t.sol`: multi-hop swaps WETH ↔ USDT via USDC
+- `SwapModuleUniV4AndVaultDepositE2EForkTest.t.sol`: USDC ↔ syrupUSDC swaps with exact input and output
+
+---
+
 ## 5. Testing Utilities
 
 ### 5.1 Overview
@@ -1128,7 +1736,7 @@ Mocks are simplified contract implementations that provide controlled, predictab
 
 ---
 
-#### StandardHookV1.sol
+#### StandardHookMock.sol
 
 **Purpose**: Mock hook implementation for testing vault hook system
 
@@ -1171,6 +1779,16 @@ Mocks are simplified contract implementations that provide controlled, predictab
 **Key Features**:
 - Simplified predeposit vault behavior
 - Used in cross-chain testing scenarios
+
+---
+
+#### Further mocks
+
+- `ERC20DecimalsMock.sol`: ERC20 with configurable decimals
+- `ChainlinkOracleMock.sol`: Chainlink feed for oracle module and pricer tests
+- `MockHurdleRateOracle.sol`: hurdle rate oracle with a settable rate
+- `test/mocks/MockTimelock.sol`: minimal timelock with one flat delay (no tiers, roles or artifact registry): `propose`, warp past the delay, then call the gated function
+- `test/periphery/mock/`: `MockLenderModule`, `MockFlashModule`, `MockSwapper`, `MockLoopingStrategy`, `MockDolomiteExchangeWrapper` for looping and position helper tests
 
 ---
 
@@ -1294,6 +1912,24 @@ Base test contracts provide standardized setup and configuration that all tests 
 - Similar to `ConcreteAsyncVaultImplBaseSetup` but for bridged variant
 
 **Inherited by**: ConcreteBridgedAsyncVaultImpl tests
+
+---
+
+#### ConcreteBridgedStandardVaultImplBaseSetup.t.sol
+
+**Purpose**: Setup for testing the bridged standard vault with unbacked minting
+
+---
+
+#### ConcreteMultiAssetDepositAsyncVaultBaseSetup.t.sol
+
+**Purpose**: Setup for the multi-asset deposit vault with pricer, multi-asset strategy and whitelisted deposit tokens
+
+---
+
+#### TimelockRealBaseSetup.t.sol
+
+**Purpose**: Shared base for the `*RealTimelockTest` suites: deploys a real `Timelock` and helpers to propose and execute gated calls
 
 ---
 

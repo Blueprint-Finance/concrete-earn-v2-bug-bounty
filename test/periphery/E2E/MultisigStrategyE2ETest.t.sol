@@ -83,7 +83,8 @@ contract MultisigStrategyE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrat
             multisig,
             uint64(1000), // maxAccountingChangeThreshold (10%)
             uint64(86400), // accountingValidityPeriod (1 day)
-            uint64(3600) // cooldownPeriod (1 hour)
+            uint64(3600), // cooldownPeriod (1 hour)
+            address(0) // timelock_ (no timelock at deploy time)
         );
 
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initData);

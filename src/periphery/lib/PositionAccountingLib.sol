@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.24;
+// SPDX-License-Identifier: AGPL-3.0
+pragma solidity ^0.8.27;
 
 import {PositionAccountingStorageLib} from "./PositionAccountingStorageLib.sol";
 import {SafeCast} from "@openzeppelin-contracts/utils/math/SafeCast.sol";
@@ -15,11 +15,20 @@ library PositionAccountingLib {
     /// @notice Basis points constant (10000 = 100%)
     uint256 public constant BASIS_POINTS = 10000;
 
+    /// @notice Hard absolute upper bound on the max accounting change threshold (5000 = 50%).
+    /// @dev Enforced at the contract level on both initialization and {setMaxAccountingChangeThreshold}
+    ///      so an admin can never configure a threshold that would allow an outsized single-step
+    ///      accounting change.
+    uint64 public constant MAX_ACCOUNTING_CHANGE_THRESHOLD_CAP = 5000;
+
     /// @notice Custom errors
     error InvalidMaxAccountingChangeThreshold();
 
-    /// @notice Minimum difference between cooldown period and accounting validity period (60 seconds)
-    uint64 private constant MIN_PERIOD_DIFFERENCE = 60;
+    /// @notice Protocol-level minimum accounting update cooldown period (60 seconds).
+    uint64 public constant MIN_COOLDOWN_PERIOD = 60;
+
+    /// @notice Minimum difference between cooldown period and accounting validity period (60 seconds).
+    uint64 public constant MIN_PERIOD_DIFFERENCE = 60;
 
     /// @notice Emitted when an accounting change is too large
     /// @param accountingNonce The accounting nonce of the accounting change
@@ -63,7 +72,9 @@ library PositionAccountingLib {
      * @param maxAccountingChangeThreshold_ The maximum accounting change threshold in basis points (BASIS_POINTS = 100%, 100 = 1%)
      */
     function setMaxAccountingChangeThreshold(uint64 maxAccountingChangeThreshold_) internal {
-        require(maxAccountingChangeThreshold_ <= BASIS_POINTS, InvalidMaxAccountingChangeThreshold());
+        require(
+            maxAccountingChangeThreshold_ <= MAX_ACCOUNTING_CHANGE_THRESHOLD_CAP, InvalidMaxAccountingChangeThreshold()
+        );
         PositionAccountingStorageLib.PositionAccountingStorage storage $ = PositionAccountingStorageLib.fetch();
         uint64 oldThreshold = $.maxAccountingChangeThreshold;
         emit MaxAccountingChangeThresholdSet(oldThreshold, maxAccountingChangeThreshold_);
@@ -90,6 +101,7 @@ library PositionAccountingLib {
      */
     function setCooldownPeriod(uint64 cooldownPeriod_) internal {
         PositionAccountingStorageLib.PositionAccountingStorage storage $ = PositionAccountingStorageLib.fetch();
+        if (cooldownPeriod_ < MIN_COOLDOWN_PERIOD) revert InvalidCooldownPeriod();
         if (cooldownPeriod_ > $.accountingValidityPeriod - MIN_PERIOD_DIFFERENCE) revert InvalidCooldownPeriod();
         uint64 oldPeriod = $.cooldownPeriod;
         emit SetCooldownPeriod(oldPeriod, cooldownPeriod_);

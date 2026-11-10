@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.27;
 
 /**
  * @title ConcreteFactory
@@ -18,6 +18,8 @@ pragma solidity ^0.8.24;
 // External dependencies
 // ─────────────────────────────────────────────────────────────────────────────
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/access/OwnableUpgradeable.sol";
+import {Ownable2StepUpgradeable} from "@openzeppelin-upgradeable/access/Ownable2StepUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {Create2} from "@openzeppelin-contracts/utils/Create2.sol";
 import {EnumerableSet} from "@openzeppelin-contracts/utils/structs/EnumerableSet.sol";
@@ -26,28 +28,66 @@ import {EnumerableSet} from "@openzeppelin-contracts/utils/structs/EnumerableSet
 // Protocol-facing interfaces
 // ─────────────────────────────────────────────────────────────────────────────
 import {IConcreteFactory} from "../interface/IConcreteFactory.sol";
+import {ITimelockProtected} from "../interface/ITimelockProtected.sol";
 import {IUpgradeableVault} from "../interface/IUpgradeableVault.sol";
+import {IContractId} from "../interface/IContractId.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal contracts
 // ─────────────────────────────────────────────────────────────────────────────
 import {IVaultProxy, VaultProxy} from "./VaultProxy.sol";
+import {IDefaultEnforcedVaultConfiguration} from "../interface/IDefaultEnforcedVaultConfiguration.sol";
+import {ContractIdPrimitive} from "../common/ContractIdPrimitive.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Storage layout libraries
 // ─────────────────────────────────────────────────────────────────────────────
 import {ConcreteFactoryBaseStorageLib as CFBSLib} from "../lib/storage/ConcreteFactoryBaseStorageLib.sol";
+import {DefaultEnforcedVaultConfigStorageLib as DEVCLib} from "../lib/storage/DefaultEnforcedVaultConfigStorageLib.sol";
+import {TimelockIntegrationLib} from "../lib/TimelockIntegrationLib.sol";
 
-contract ConcreteFactory is IConcreteFactory, UUPSUpgradeable, OwnableUpgradeable {
+contract ConcreteFactory is
+    IConcreteFactory,
+    UUPSUpgradeable,
+    Ownable2StepUpgradeable,
+    PausableUpgradeable,
+    ContractIdPrimitive
+{
     using EnumerableSet for EnumerableSet.AddressSet;
 
+    // ── Version validation ────────────────────────────────────────────────────
+
     /**
-     * @dev A modifier to validate version
-     * @param version implementation's version
+     * @dev A modifier to validate vault ID
+     * @param vaultImpl implementation's vault ID
      */
-    modifier checkVersion(uint64 version) {
-        require(version > 0 && version <= lastVersion(), InvalidVersion());
+    modifier checkVersion(uint64 vaultImpl) {
+        bool isValid;
+        (isValid,) = _isValidVaultImpl(vaultImpl);
+        require(isValid, InvalidVersion());
         _;
+    }
+
+    /// @dev Applied to privileged functions that require a prior {ITimelock.propose}
+    ///      followed by the matured tier delay before they can execute.
+    modifier afterDelay() {
+        TimelockIntegrationLib.enforceDelay(msg.sig, msg.data[4:]);
+        _;
+    }
+
+    /// @dev Restricts a function to the FACTORY_MANAGER role. The manager is assigned by the
+    ///      owner via {setFactoryManager} and handles frequent operational functions, kept
+    ///      strictly separate from the owner's high-privilege functions.
+    modifier onlyFactoryManager() {
+        require(msg.sender == CFBSLib.fetch().factoryManager, NotFactoryManager());
+        _;
+    }
+
+    function _isValidVaultImpl(uint64 vaultImpl) internal view returns (bool isValid, bool isLegacyVersion) {
+        address implementation = CFBSLib.fetch().vaultImplToImplementation[vaultImpl];
+        if (implementation != address(0)) return (true, false);
+        if (vaultImpl > 0 && vaultImpl <= lastVersion()) return (true, true);
+        return (false, false);
     }
 
     /**
@@ -59,69 +99,214 @@ contract ConcreteFactory is IConcreteFactory, UUPSUpgradeable, OwnableUpgradeabl
 
     /**
      * @dev Initializes the ConcreteFactory contract.
-     * @param owner_ The address of the owner of the factory.
+     * @param owner_    The address of the owner of the factory. Also assigned the
+     *                  FACTORY_MANAGER role at deployment; the owner can later
+     *                  delegate it to a separate address via {setFactoryManager}.
+     * @param timelock_ Address of the Timelock contract. Pass `address(0)` to
+     *                  deploy without timelock enforcement (timelock can be
+     *                  configured later once the Timelock is activated).
      */
-    function initialize(address owner_) external initializer {
+    function initialize(address owner_, address timelock_) external initializer {
         __Ownable_init_unchained(owner_);
         __UUPSUpgradeable_init_unchained();
+        __Pausable_init_unchained();
+        CFBSLib.fetch().factoryManager = owner_;
+        emit FactoryManagerSet(address(0), owner_);
+        if (timelock_ != address(0)) TimelockIntegrationLib.setTimelock(timelock_);
     }
 
     /**
      * @inheritdoc IConcreteFactory
      */
-    function approveImplementation(address implementation) external onlyOwner {
+    function approveImplementation(address implementation) external onlyFactoryManager afterDelay {
         require(IUpgradeableVault(implementation).factory() == address(this), InvalidImplementation());
+        uint64 vaultImpl = IContractId(implementation).ID();
+        require(vaultImpl != 0, ZeroVaultImplId());
         // load the storage variable
         CFBSLib.ConcreteFactoryBaseStorage storage $ = CFBSLib.fetch();
-        require($.implementations.add(implementation), AlreadyApproved());
-
+        require($.vaultImplToImplementation[vaultImpl] == address(0), AlreadyApproved());
+        $.vaultImplToImplementation[vaultImpl] = implementation;
+        // keeping previous event for backwards compatibility
         emit ApprovedImplementation(implementation);
+        emit NewVaultImplToImplementation(vaultImpl, implementation);
     }
 
     /**
      * @inheritdoc IConcreteFactory
      */
-    function blockImplementation(uint64 version) external onlyOwner checkVersion(version) {
+    function blockImplementation(uint64 vaultImpl) external onlyFactoryManager checkVersion(vaultImpl) {
+        _blockImplementation(vaultImpl);
+    }
+
+    /**
+     * @inheritdoc IConcreteFactory
+     * @dev Owner-only and timelock-gated (Tier 2): unblocking re-enables deployment/migration to an
+     *      implementation, so it carries the same weight as approving one.
+     */
+    function unblockImplementation(uint64 vaultImpl) external onlyOwner afterDelay checkVersion(vaultImpl) {
         CFBSLib.ConcreteFactoryBaseStorage storage $ = CFBSLib.fetch();
-        require(!$.blocked[version], AlreadyBlocked());
-
-        $.blocked[version] = true;
-
-        emit Blocked(version);
+        require($.blocked[vaultImpl], NotBlocked());
+        $.blocked[vaultImpl] = false;
+        emit Unblocked(vaultImpl);
     }
 
     /**
      * @inheritdoc IConcreteFactory
      */
-    function setMigratable(uint64 fromVersion, uint64 toVersion)
+    function setMigratable(uint64 fromVaultImpl, uint64 toVaultImpl)
         external
-        onlyOwner
-        checkVersion(fromVersion)
-        checkVersion(toVersion)
+        onlyFactoryManager
+        afterDelay
+        checkVersion(fromVaultImpl)
+        checkVersion(toVaultImpl)
     {
-        require(fromVersion < toVersion, OldVersion());
+        _setMigratable(fromVaultImpl, toVaultImpl);
+    }
+
+    /**
+     * @inheritdoc IConcreteFactory
+     * @dev Factory-manager-only and NOT timelocked: closing a wrongly-opened migration path is a
+     *      restrictive correction, so it can be applied promptly without a queued proposal.
+     */
+    function unsetMigratable(uint64 fromVaultImpl, uint64 toVaultImpl)
+        external
+        onlyFactoryManager
+        checkVersion(fromVaultImpl)
+        checkVersion(toVaultImpl)
+    {
+        CFBSLib.ConcreteFactoryBaseStorage storage $ = CFBSLib.fetch();
+        require($.migratable[fromVaultImpl][toVaultImpl], NotMigratable());
+        $.migratable[fromVaultImpl][toVaultImpl] = false;
+        emit MigratableUnset(fromVaultImpl, toVaultImpl);
+    }
+
+    /**
+     * @inheritdoc IConcreteFactory
+     */
+    function blockImplementationByAddress(address implementation) external onlyFactoryManager {
+        uint64 vaultImpl = _getVaultImplByImplementation(implementation);
+        _blockImplementation(vaultImpl);
+    }
+
+    /**
+     * @inheritdoc IConcreteFactory
+     */
+    function setMigratableByAddress(address fromImplementation, address toImplementation)
+        external
+        onlyFactoryManager
+        afterDelay
+    {
+        uint64 fromVaultImpl = _getVaultImplByImplementation(fromImplementation);
+        uint64 toVaultImpl = _getVaultImplByImplementation(toImplementation);
+        _setMigratable(fromVaultImpl, toVaultImpl);
+    }
+
+    /**
+     * @dev Internal function to block an implementation by vault ID.
+     * @param vaultImpl The vault ID to block
+     */
+    function _blockImplementation(uint64 vaultImpl) internal {
+        CFBSLib.ConcreteFactoryBaseStorage storage $ = CFBSLib.fetch();
+        require(!$.blocked[vaultImpl], AlreadyBlocked());
+
+        $.blocked[vaultImpl] = true;
+
+        emit Blocked(vaultImpl);
+    }
+
+    /**
+     * @dev Internal function to set a migration path between vault IDs.
+     * @param fromVaultImpl The source vault ID
+     * @param toVaultImpl The target vault ID
+     */
+    function _setMigratable(uint64 fromVaultImpl, uint64 toVaultImpl) internal {
+        // check if toVaultImpl is a legacy version
+        bool isLegacyVersion;
+        (, isLegacyVersion) = _isValidVaultImpl(toVaultImpl);
+        bool vaultImplCondition = isLegacyVersion ? fromVaultImpl < toVaultImpl : fromVaultImpl != toVaultImpl;
+        require(vaultImplCondition, OldVersion());
 
         CFBSLib.ConcreteFactoryBaseStorage storage $ = CFBSLib.fetch();
-        $.migratable[fromVersion][toVersion] = true;
+        $.migratable[fromVaultImpl][toVaultImpl] = true;
 
-        emit Migratable(fromVersion, toVersion);
+        emit Migratable(fromVaultImpl, toVaultImpl);
+    }
+
+    /**
+     * @dev Internal function to get the vault ID of a registered vault.
+     * @param registeredVault The registered vault address to get the vault ID for
+     * @return vaultImpl The vault ID
+     * @dev First tries to call the ID function. If it exists, returns the vault ID. Otherwise, calls the version() function.
+     *      Reverts if the registered vault is not found.
+     */
+    function _getVaultImplOfRegisteredVault(address registeredVault)
+        internal
+        view
+        returns (uint64 vaultImpl, bool legacyVersion)
+    {
+        // first try to get the id
+        (vaultImpl, legacyVersion) = _getIdOfContract(registeredVault);
+        if (!legacyVersion) return (vaultImpl, false);
+        // if not, fall back to legacy version-based lookup, i.e. call .version() on the registered vault
+        return (IUpgradeableVault(registeredVault).version(), true);
+    }
+
+    /**
+     * @dev Internal function to get the vault ID by implementation address.
+     * @param implementation The implementation address to get the vault ID for
+     * @return vaultImpl The legacy vault ids were incremental starting with 1. The new vault ids are queried from the implementation's ID function.
+     * @dev First tries to call the ID function. If it exists, returns the vault ID. If it doesn't, performs a linear search through the implementations set.
+     *      Reverts if the implementation is not found.
+     */
+    function _getVaultImplByImplementation(address implementation) private view returns (uint64) {
+        // NOTE: without legacy this would be as simple as:
+        // return IContractId(implementation).ID();
+        // but some implementations do not implement this function.
+        (uint64 vaultImpl, bool hasNoId) = _getIdOfContract(implementation);
+        if (!hasNoId && CFBSLib.fetch().vaultImplToImplementation[vaultImpl] == implementation) return vaultImpl;
+        // If ID() doesn't exist, failed, or returned 0/invalid, fall back to legacy
+        return _getVaultImplByImplementationLegacy(implementation);
+    }
+
+    /**
+     * @dev legacy Internal helper to find the vault ID for a given implementation address.
+     * @param implementation The implementation address to find
+     * @return vaultImpl The legacy vault ids were incremental starting with 1. The new vault ids are queried from the implementation's ID function.
+     * @dev Performs a linear search through the legacyImplementationSet set.
+     *      Reverts if the implementation is not found.
+     */
+    function _getVaultImplByImplementationLegacy(address implementation) private view returns (uint64) {
+        CFBSLib.ConcreteFactoryBaseStorage storage $ = CFBSLib.fetch();
+        uint256 length = $.legacyImplementationSet.length();
+
+        for (uint256 i = 0; i < length; ++i) {
+            if ($.legacyImplementationSet.at(i) == implementation) {
+                return uint64(i + 1); // Convert to 1-indexed
+            }
+        }
+
+        revert IConcreteFactory.ImplementationNotFound();
     }
 
     /**
      * @inheritdoc IConcreteFactory
      */
-    function create(uint64 version, address ownerAddr, bytes calldata data) external returns (address) {
-        return create(version, ownerAddr, data, 0);
+    function create(uint64 vaultImpl, address ownerAddr, bytes calldata data) external returns (address) {
+        return create(vaultImpl, ownerAddr, data, bytes32(0));
     }
 
     /**
      * @inheritdoc IConcreteFactory
      */
-    function create(uint64 version, address ownerAddr, bytes calldata data, bytes32 salt) public returns (address) {
-        address predictedAddress = predictVaultAddress(version, ownerAddr, data, salt);
+    function create(uint64 vaultImpl, address ownerAddr, bytes calldata data, bytes32 salt)
+        public
+        whenNotPaused
+        returns (address)
+    {
+        address predictedAddress = predictVaultAddress(vaultImpl, ownerAddr, data, salt);
 
         CFBSLib.fetch().vaults[predictedAddress] = true;
-        bytes memory bytecode = _computeBytecode(version, ownerAddr, data);
+        bytes memory bytecode = _computeBytecode(vaultImpl, ownerAddr, data);
 
         // Deploy using OpenZeppelin Create2
         address concreteVault = Create2.deploy(0, salt, bytecode);
@@ -130,7 +315,7 @@ contract ConcreteFactory is IConcreteFactory, UUPSUpgradeable, OwnableUpgradeabl
 
         // Mark the vault as deployed by this factory
 
-        emit Deployed(concreteVault, version, ownerAddr);
+        emit Deployed(concreteVault, vaultImpl, ownerAddr);
 
         return concreteVault;
     }
@@ -138,40 +323,53 @@ contract ConcreteFactory is IConcreteFactory, UUPSUpgradeable, OwnableUpgradeabl
     /**
      * @inheritdoc IConcreteFactory
      */
-    function predictVaultAddress(uint64 version, address ownerAddr, bytes calldata data)
+    function predictVaultAddress(uint64 vaultImpl, address ownerAddr, bytes calldata data)
         external
         view
         returns (address)
     {
-        return predictVaultAddress(version, ownerAddr, data, 0);
+        return predictVaultAddress(vaultImpl, ownerAddr, data, bytes32(0));
     }
 
-    function _computeBytecode(uint64 version, address ownerAddr, bytes calldata data)
+    function _computeBytecode(uint64 vaultImpl, address ownerAddr, bytes calldata data)
         internal
         view
         returns (bytes memory)
     {
-        require(!isBlocked(version), ImplementationBlocked());
+        require(!isBlocked(vaultImpl), ImplementationBlocked());
 
         // Get the implementation address
-        address implementation = getImplementationByVersion(version);
+        address implementation = getImplementationByVaultImpl(vaultImpl);
 
-        // Encode the constructor parameters
-        bytes memory constructorData = abi.encodeCall(IUpgradeableVault.initialize, (version, ownerAddr, data));
+        // Encode the constructor parameters - pass storage struct directly
+        bytes memory constructorData =
+            abi.encodeCall(IUpgradeableVault.initialize, (vaultImpl, ownerAddr, DEVCLib.fetch(), data));
 
         // Create the bytecode for deployment
-        return abi.encodePacked(type(VaultProxy).creationCode, abi.encode(implementation, constructorData));
+        // Note: VAULT_PROXY_CREATION_CODE() returns the hardcoded creation code embedded in the factory's bytecode
+        // If the factory is upgraded with a different compiler version, this value may change,
+        // which could affect CREATE2 address determinism for new deployments
+        // It is then recommended call the implementation's VAULT_PROXY_CREATION_CODE() function to get the correct creation code.
+        return abi.encodePacked(VAULT_PROXY_CREATION_CODE(), abi.encode(implementation, constructorData));
+    }
+
+    /**
+     * @dev Returns the VaultProxy creation code (hardcoded at compile time).
+     * @return The creation code bytes embedded in the factory's bytecode
+     */
+    function VAULT_PROXY_CREATION_CODE() public pure returns (bytes memory) {
+        return type(VaultProxy).creationCode;
     }
 
     /**
      * @inheritdoc IConcreteFactory
      */
-    function predictVaultAddress(uint64 version, address ownerAddr, bytes calldata data, bytes32 salt)
+    function predictVaultAddress(uint64 vaultImpl, address ownerAddr, bytes calldata data, bytes32 salt)
         public
         view
         returns (address)
     {
-        bytes memory bytecode = _computeBytecode(version, ownerAddr, data);
+        bytes memory bytecode = _computeBytecode(vaultImpl, ownerAddr, data);
 
         // Compute CREATE2 address using OpenZeppelin
         return Create2.computeAddress(salt, keccak256(bytecode), address(this));
@@ -180,17 +378,20 @@ contract ConcreteFactory is IConcreteFactory, UUPSUpgradeable, OwnableUpgradeabl
     /**
      * @inheritdoc IConcreteFactory
      */
-    function upgrade(address vault, uint64 newVersion, bytes calldata data) external {
-        _upgrade(vault, newVersion, data);
+    function upgrade(address vault, uint64 newVaultImpl, bytes calldata data) external whenNotPaused {
+        _upgrade(vault, newVaultImpl, data);
     }
 
     /**
      * @inheritdoc IConcreteFactory
      */
-    function batchUpgrade(address[] calldata vaultAddresses, uint64 newVersion, bytes[] calldata data) external {
+    function batchUpgrade(address[] calldata vaultAddresses, uint64 newVaultImpl, bytes[] calldata data)
+        external
+        whenNotPaused
+    {
         require(vaultAddresses.length == data.length, InvalidDataLength());
         for (uint256 i = 0; i < vaultAddresses.length; i++) {
-            _upgrade(vaultAddresses[i], newVersion, data[i]);
+            _upgrade(vaultAddresses[i], newVaultImpl, data[i]);
         }
     }
 
@@ -198,34 +399,51 @@ contract ConcreteFactory is IConcreteFactory, UUPSUpgradeable, OwnableUpgradeabl
      * @inheritdoc IConcreteFactory
      */
     function lastVersion() public view returns (uint64) {
-        return uint64(CFBSLib.fetch().implementations.length());
+        return uint64(CFBSLib.fetch().legacyImplementationSet.length());
+    }
+
+    /**
+     * @notice This is a legacy function that has been downgraded to internal and is used as a fallback for getImplementationByVaultImpl.
+     * @param version The version to get the implementation for
+     * @return The implementation address
+     * @dev This function is used as a fallback for getImplementationByVaultImpl.
+     */
+    function getImplementationByVersion(uint64 version) internal view returns (address) {
+        return CFBSLib.fetch().legacyImplementationSet.at(version - 1);
     }
 
     /**
      * @inheritdoc IConcreteFactory
      */
-    function getImplementationByVersion(uint64 version) public view checkVersion(version) returns (address) {
-        return CFBSLib.fetch().implementations.at(version - 1);
+    function getImplementationByVaultImpl(uint64 vaultImpl) public view returns (address) {
+        CFBSLib.ConcreteFactoryBaseStorage storage $ = CFBSLib.fetch();
+        address implementation = $.vaultImplToImplementation[vaultImpl];
+
+        // If the mapping has an entry, return it
+        if (implementation != address(0)) return implementation;
+
+        // Otherwise fall back to legacy version-based lookup
+        return getImplementationByVersion(vaultImpl);
     }
 
     /**
      * @inheritdoc IConcreteFactory
      */
-    function isBlocked(uint64 version) public view checkVersion(version) returns (bool) {
-        return CFBSLib.fetch().blocked[version];
+    function isBlocked(uint64 vaultImpl) public view checkVersion(vaultImpl) returns (bool) {
+        return CFBSLib.fetch().blocked[vaultImpl];
     }
 
     /**
      * @inheritdoc IConcreteFactory
      */
-    function isMigratable(uint64 fromVersion, uint64 toVersion)
+    function isMigratable(uint64 fromVaultImpl, uint64 toVaultImpl)
         public
         view
-        checkVersion(fromVersion)
-        checkVersion(toVersion)
+        checkVersion(fromVaultImpl)
+        checkVersion(toVaultImpl)
         returns (bool)
     {
-        return CFBSLib.fetch().migratable[fromVersion][toVersion];
+        return CFBSLib.fetch().migratable[fromVaultImpl][toVaultImpl];
     }
 
     /**
@@ -242,7 +460,7 @@ contract ConcreteFactory is IConcreteFactory, UUPSUpgradeable, OwnableUpgradeabl
      * useful in case of pre-v2 migrations
      * @param vault The vault address to register
      */
-    function registerVault(address vault) external onlyOwner {
+    function registerVault(address vault) external onlyFactoryManager {
         require(vault != address(0), ZeroAddress());
         require(!CFBSLib.fetch().vaults[vault], VaultAlreadyRegistered());
         require(IUpgradeableVault(vault).factory() == address(this), InvalidImplementation());
@@ -252,29 +470,149 @@ contract ConcreteFactory is IConcreteFactory, UUPSUpgradeable, OwnableUpgradeabl
         emit VaultRegistered(vault);
     }
 
+    // ── Factory manager admin ───────────────────────────────────────────────────
+
+    /**
+     * @inheritdoc IConcreteFactory
+     * @dev Only the owner can assign the manager. Immediate (no timelock) so a compromised
+     *      manager can be rotated promptly. The owner and manager roles are strictly separate.
+     */
+    function setFactoryManager(address manager) external onlyOwner {
+        require(manager != address(0), ZeroAddress());
+        CFBSLib.ConcreteFactoryBaseStorage storage $ = CFBSLib.fetch();
+        emit FactoryManagerSet($.factoryManager, manager);
+        $.factoryManager = manager;
+    }
+
+    /**
+     * @inheritdoc IConcreteFactory
+     */
+    function getFactoryManager() external view returns (address) {
+        return CFBSLib.fetch().factoryManager;
+    }
+
+    // ── Pause controls ──────────────────────────────────────────────────────────
+
+    /**
+     * @inheritdoc IConcreteFactory
+     * @dev Callable by the factory manager with no timelock delay so deployments can be
+     *      halted promptly in an emergency.
+     */
+    function pause() external onlyFactoryManager {
+        _pause();
+    }
+
+    /**
+     * @inheritdoc IConcreteFactory
+     * @dev Only the owner can unpause and only behind the timelock, so resuming deployments
+     *      requires a prior queued and matured proposal.
+     */
+    function unpause() external onlyOwner afterDelay {
+        _unpause();
+    }
+
+    /**
+     * @inheritdoc IConcreteFactory
+     */
+    function setDefaultEnforcedVaultConfiguration(address managementFeeRecipient, address performanceFeeRecipient)
+        external
+        onlyOwner
+        afterDelay
+    {
+        require(managementFeeRecipient != address(0), ZeroAddress());
+        require(performanceFeeRecipient != address(0), ZeroAddress());
+
+        IDefaultEnforcedVaultConfiguration.DefaultEnforcedVaultConfiguration storage feeConfig = DEVCLib.fetch();
+        feeConfig.defaultManagementFeeRecipient = managementFeeRecipient;
+        feeConfig.defaultPerformanceFeeRecipient = performanceFeeRecipient;
+
+        emit DefaultEnforcedVaultConfigurationUpdated(managementFeeRecipient, performanceFeeRecipient);
+    }
+
+    /**
+     * @inheritdoc IConcreteFactory
+     */
+    function getDefaultEnforcedVaultConfiguration()
+        external
+        view
+        returns (address defaultManagementFeeRecipient, address defaultPerformanceFeeRecipient)
+    {
+        IDefaultEnforcedVaultConfiguration.DefaultEnforcedVaultConfiguration storage feeConfig = DEVCLib.fetch();
+        return (feeConfig.defaultManagementFeeRecipient, feeConfig.defaultPerformanceFeeRecipient);
+    }
+
+    // ── Timelock admin ────────────────────────────────────────────────────────
+
+    /// @inheritdoc ITimelockProtected
+    /// @dev Only callable by the owner and only before timelock enforcement is activated.
+    ///      After {activateTimelock} the timelock address is permanently locked.
+    function setTimelock(address timelock_) external afterDelay onlyOwner {
+        if (timelock_ == address(0)) revert ZeroAddress();
+        TimelockIntegrationLib.setTimelock(timelock_);
+        emit TimelockSet(timelock_);
+    }
+
+    /// @inheritdoc ITimelockProtected
+    function activateTimelock() external onlyOwner {
+        address tl = TimelockIntegrationLib.activateTimelock();
+        emit TimelockActivated(tl);
+    }
+
+    /// @inheritdoc ITimelockProtected
+    function getTimelock() external view returns (address timelock_, bool active_) {
+        return TimelockIntegrationLib.state();
+    }
+
     /**
      * @dev Internal function to upgrade a vault to a new implementation version
      * @param vault The vault address to upgrade
-     * @param newVersion The target implementation version
+     * @param newVaultImpl The target implementation vault ID
      * @param data Custom data to pass to the new implementation's upgrade function
      */
-    function _upgrade(address vault, uint64 newVersion, bytes calldata data) internal {
+    function _upgrade(address vault, uint64 newVaultImpl, bytes calldata data) internal {
+        // check guards
         require(isRegisteredVault(vault), NotRegisteredVault());
         require(msg.sender == OwnableUpgradeable(vault).owner(), NotOwner());
+        // initialize variables
+        uint64 currentVaultImpl = 0;
+        bool newVaultIsLegacy = false;
+        // load migration conditions
+        (currentVaultImpl,) = _getVaultImplOfRegisteredVault(vault);
+        (, newVaultIsLegacy) = _isValidVaultImpl(newVaultImpl);
+        bool versionCondition = newVaultIsLegacy ? currentVaultImpl < newVaultImpl : currentVaultImpl != newVaultImpl;
+        // check migration conditions
+        require(versionCondition, OldVersion());
+        require(isMigratable(currentVaultImpl, newVaultImpl), CanNotMigrate());
+        require(!isBlocked(newVaultImpl), ImplementationBlocked());
 
-        uint64 currentVaultVersion = IUpgradeableVault(vault).version();
-
-        require(newVersion > currentVaultVersion, OldVersion());
-        require(isMigratable(currentVaultVersion, newVersion), CanNotMigrate());
-        require(!isBlocked(newVersion), ImplementationBlocked());
-
+        // perform upgrade
         IVaultProxy(vault)
             .upgradeToAndCall(
-                getImplementationByVersion(newVersion), abi.encodeCall(IUpgradeableVault.upgrade, (newVersion, data))
+                getImplementationByVaultImpl(newVaultImpl),
+                abi.encodeCall(IUpgradeableVault.upgrade, (newVaultImpl, data))
             );
 
-        emit Migrated(vault, newVersion);
+        // emit event
+        emit Migrated(vault, newVaultImpl);
     }
 
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+    /// @dev Gates ownership transfers behind the timelock so that factory ownership
+    ///      cannot be transferred without a prior queued and matured proposal. Uses the
+    ///      two-step flow: this sets the pending owner, who must then call {acceptOwnership}.
+    function transferOwnership(address newOwner) public override onlyOwner afterDelay {
+        super.transferOwnership(newOwner);
+    }
+
+    /// @notice Permanently disabled — renouncing ownership is not permitted.
+    function renounceOwnership() public override onlyOwner {
+        revert RenounceOwnershipDisabled();
+    }
+
+    /// @dev Authorizes a UUPS upgrade of the factory itself. Gated behind the timelock so the
+    ///      upgrade requires a prior queued and matured proposal. Emits {FactoryUpgradeAuthorized}
+    ///      in addition to OZ's {IERC1967.Upgraded} so monitoring can attribute the upgrade to the
+    ///      queued proposal that authorized it.
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner afterDelay {
+        emit FactoryUpgradeAuthorized(newImplementation, msg.sender);
+    }
 }

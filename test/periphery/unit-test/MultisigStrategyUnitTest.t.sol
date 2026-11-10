@@ -30,6 +30,7 @@ contract MultisigStrategyUnitTest is Test {
     address public operator;
 
     event MultiSigSet(address indexed multiSig, address indexed newMultiSig);
+    event MultiSigTransferStarted(address indexed multiSig, address indexed pendingMultiSig);
     event AssetsForwarded(address indexed asset, uint256 amount, address multiSig);
     event AssetsRetrieved(address indexed asset, uint256 amount, address multiSig);
 
@@ -59,7 +60,8 @@ contract MultisigStrategyUnitTest is Test {
             multisig,
             uint64(1000), // maxAccountingChangeThreshold (10%)
             uint64(86400), // accountingValidityPeriod (1 day)
-            uint64(3600) // cooldownPeriod (1 hour)
+            uint64(3600), // cooldownPeriod (1 hour)
+            address(0) // timelock_ (no timelock at deploy time)
         );
 
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initData);
@@ -69,9 +71,47 @@ contract MultisigStrategyUnitTest is Test {
     function testConstructor() public view {
         assertEq(strategy.asset(), address(asset));
         assertTrue(strategy.hasRole(PeripheryRolesLib.STRATEGY_ADMIN, admin));
+        assertTrue(strategy.hasRole(PeripheryRolesLib.ROLE_ADMIN, admin));
+        assertTrue(strategy.hasRole(PeripheryRolesLib.PAUSER, admin));
         assertEq(strategy.getVault(), address(vault));
         assertEq(uint8(strategy.strategyType()), uint8(StrategyType.ASYNC));
         assertEq(strategy.maxAllocation(), type(uint256).max);
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.STRATEGY_ADMIN), 1);
+        assertEq(strategy.getRoleMember(PeripheryRolesLib.STRATEGY_ADMIN, 0), admin);
+    }
+
+    function testRoleAdminCanGrantRoles() public {
+        address newOperator = makeAddr("newOperator");
+        address newAdmin = makeAddr("newAdmin");
+
+        // Admin has ROLE_ADMIN, so can grant OPERATOR_ROLE
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator);
+        assertTrue(strategy.hasRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator));
+
+        // Admin can grant STRATEGY_ADMIN
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.STRATEGY_ADMIN, newAdmin);
+        assertTrue(strategy.hasRole(PeripheryRolesLib.STRATEGY_ADMIN, newAdmin));
+
+        // Admin can grant PAUSER
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.PAUSER, newAdmin);
+        assertTrue(strategy.hasRole(PeripheryRolesLib.PAUSER, newAdmin));
+    }
+
+    function testRoleAdminCanRevokeRoles() public {
+        address newOperator = makeAddr("newOperator");
+
+        // Grant role first
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator);
+        assertTrue(strategy.hasRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator));
+
+        // Revoke role using ROLE_ADMIN
+        vm.prank(admin);
+        strategy.revokeRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator);
+        assertFalse(strategy.hasRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator));
     }
 
     function testInitializeRevertIfInvalidMultiSigAddress() public {
@@ -85,7 +125,8 @@ contract MultisigStrategyUnitTest is Test {
             multisig,
             uint64(100001), // maxAccountingChangeThreshold (100% + 1%)
             uint64(86400), // accountingValidityPeriod (1 day)
-            uint64(3600) // cooldownPeriod (1 hour)
+            uint64(3600), // cooldownPeriod (1 hour)
+            address(0) // timelock_
         );
         vm.expectRevert(abi.encodeWithSelector(PositionAccountingLib.InvalidMaxAccountingChangeThreshold.selector));
         new ERC1967Proxy(address(impl), initData);
@@ -103,13 +144,60 @@ contract MultisigStrategyUnitTest is Test {
     function testSetMultiSig() public {
         address newMultisig = makeAddr("newMultisig");
 
+        // Step 1: propose — only records the pending multi-sig, active stays unchanged
         vm.expectEmit(true, true, false, true);
-        emit MultiSigSet(multisig, newMultisig);
+        emit MultiSigTransferStarted(multisig, newMultisig);
 
         vm.prank(admin);
         strategy.setMultiSig(newMultisig);
 
+        assertEq(strategy.getMultiSig(), multisig);
+        assertEq(strategy.getPendingMultiSig(), newMultisig);
+
+        // Step 2: accept — only the pending multi-sig can finalize the transfer
+        vm.expectEmit(true, true, false, true);
+        emit MultiSigSet(multisig, newMultisig);
+
+        vm.prank(newMultisig);
+        strategy.acceptMultiSig();
+
         assertEq(strategy.getMultiSig(), newMultisig);
+        assertEq(strategy.getPendingMultiSig(), address(0));
+    }
+
+    function testAcceptMultiSig_revertsForNonPending() public {
+        address newMultisig = makeAddr("newMultisig");
+
+        vm.prank(admin);
+        strategy.setMultiSig(newMultisig);
+
+        vm.prank(makeAddr("stranger"));
+        vm.expectRevert(MultisigStrategy.NotPendingMultiSig.selector);
+        strategy.acceptMultiSig();
+
+        // active multi-sig unchanged
+        assertEq(strategy.getMultiSig(), multisig);
+    }
+
+    function testSetMultiSig_reproposeOverwritesPending() public {
+        address first = makeAddr("firstMultisig");
+        address second = makeAddr("secondMultisig");
+
+        vm.startPrank(admin);
+        strategy.setMultiSig(first);
+        strategy.setMultiSig(second);
+        vm.stopPrank();
+
+        assertEq(strategy.getPendingMultiSig(), second);
+
+        // stale proposal can no longer be accepted
+        vm.prank(first);
+        vm.expectRevert(MultisigStrategy.NotPendingMultiSig.selector);
+        strategy.acceptMultiSig();
+
+        vm.prank(second);
+        strategy.acceptMultiSig();
+        assertEq(strategy.getMultiSig(), second);
     }
 
     function testSetOperator() public {
@@ -131,6 +219,10 @@ contract MultisigStrategyUnitTest is Test {
     }
 
     function testPauseUnpause() public {
+        // Grant PAUSER role to admin
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.PAUSER, admin);
+
         vm.prank(admin);
         strategy.pause();
 
@@ -159,6 +251,18 @@ contract MultisigStrategyUnitTest is Test {
         vm.prank(admin);
         vm.expectRevert(PositionAccountingLib.InvalidMaxAccountingChangeThreshold.selector);
         strategy.setMaxAccountingChangeThreshold(newThreshold);
+    }
+
+    function testSetMaxAccountingChangeThresholdRespectsHardCap() public {
+        // The hard cap is 5000 (50%); the boundary value is allowed.
+        vm.prank(admin);
+        strategy.setMaxAccountingChangeThreshold(PositionAccountingLib.MAX_ACCOUNTING_CHANGE_THRESHOLD_CAP);
+        assertEq(strategy.getMaxAccountingChangeThreshold(), PositionAccountingLib.MAX_ACCOUNTING_CHANGE_THRESHOLD_CAP);
+
+        // One basis point over the cap (and below the old 10000 limit) reverts.
+        vm.prank(admin);
+        vm.expectRevert(PositionAccountingLib.InvalidMaxAccountingChangeThreshold.selector);
+        strategy.setMaxAccountingChangeThreshold(PositionAccountingLib.MAX_ACCOUNTING_CHANGE_THRESHOLD_CAP + 1);
     }
 
     function testSetAccountingValidityPeriod() public {
@@ -360,5 +464,107 @@ contract MultisigStrategyUnitTest is Test {
 
         // Verify assets were transferred to vault
         assertEq(asset.balanceOf(address(vault)), amount);
+    }
+
+    function testStrategyAccessControl() public {
+        address newAdmin = address(0x9999);
+        vm.startPrank(admin);
+        // add new role admin and check the admin roles
+        strategy.grantRole(PeripheryRolesLib.ROLE_ADMIN, newAdmin);
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.ROLE_ADMIN), 2);
+        assertEq(strategy.getRoleMember(PeripheryRolesLib.ROLE_ADMIN, 1), newAdmin);
+        vm.stopPrank();
+        // new role admin can grant strategy admin and operator roles
+        vm.startPrank(newAdmin);
+        strategy.grantRole(PeripheryRolesLib.STRATEGY_ADMIN, newAdmin);
+        strategy.grantRole(PeripheryRolesLib.OPERATOR_ROLE, newAdmin);
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.STRATEGY_ADMIN), 2);
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.OPERATOR_ROLE), 2);
+        vm.stopPrank();
+    }
+
+    // ── Last ROLE_ADMIN protection ────────────────────────────────────────────
+
+    function testLastRoleAdminCannotRevokeItself() public {
+        // Only `admin` holds ROLE_ADMIN, so it cannot revoke its own admin role.
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.ROLE_ADMIN), 1);
+
+        vm.prank(admin);
+        vm.expectRevert(IBaseStrategy.CannotRemoveLastRoleAdmin.selector);
+        strategy.revokeRole(PeripheryRolesLib.ROLE_ADMIN, admin);
+
+        assertTrue(strategy.hasRole(PeripheryRolesLib.ROLE_ADMIN, admin));
+    }
+
+    function testLastRoleAdminCannotRenounceItself() public {
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.ROLE_ADMIN), 1);
+
+        vm.prank(admin);
+        vm.expectRevert(IBaseStrategy.CannotRemoveLastRoleAdmin.selector);
+        strategy.renounceRole(PeripheryRolesLib.ROLE_ADMIN, admin);
+
+        assertTrue(strategy.hasRole(PeripheryRolesLib.ROLE_ADMIN, admin));
+    }
+
+    function testRoleAdminCanSelfRevokeWhenMultipleAdmins() public {
+        address newAdmin = makeAddr("newAdmin");
+
+        // Add a second ROLE_ADMIN.
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.ROLE_ADMIN, newAdmin);
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.ROLE_ADMIN), 2);
+
+        // With two admins, one can self-revoke (or renounce).
+        vm.prank(admin);
+        strategy.renounceRole(PeripheryRolesLib.ROLE_ADMIN, admin);
+
+        assertFalse(strategy.hasRole(PeripheryRolesLib.ROLE_ADMIN, admin));
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.ROLE_ADMIN), 1);
+    }
+
+    function testRoleAdminCanRevokeAnotherWhenMultipleAdmins() public {
+        address newAdmin = makeAddr("newAdmin");
+
+        vm.startPrank(admin);
+        strategy.grantRole(PeripheryRolesLib.ROLE_ADMIN, newAdmin);
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.ROLE_ADMIN), 2);
+
+        // With two admins, an admin can remove the other.
+        strategy.revokeRole(PeripheryRolesLib.ROLE_ADMIN, newAdmin);
+        vm.stopPrank();
+
+        assertFalse(strategy.hasRole(PeripheryRolesLib.ROLE_ADMIN, newAdmin));
+        assertTrue(strategy.hasRole(PeripheryRolesLib.ROLE_ADMIN, admin));
+        assertEq(strategy.getRoleMemberCount(PeripheryRolesLib.ROLE_ADMIN), 1);
+    }
+
+    // ── Timelock interface ────────────────────────────────────────────────────
+
+    function testTimelockSetAndGet() public {
+        address timelockAddr = makeAddr("timelock");
+
+        (address tl, bool active) = strategy.getTimelock();
+        assertEq(tl, address(0));
+        assertFalse(active);
+
+        vm.prank(admin);
+        strategy.setTimelock(timelockAddr);
+
+        (tl, active) = strategy.getTimelock();
+        assertEq(tl, timelockAddr);
+        assertFalse(active);
+    }
+
+    function testTimelockActivate() public {
+        address timelockAddr = makeAddr("timelock");
+
+        vm.startPrank(admin);
+        strategy.setTimelock(timelockAddr);
+        strategy.activateTimelock();
+        vm.stopPrank();
+
+        (address tl, bool active) = strategy.getTimelock();
+        assertEq(tl, timelockAddr);
+        assertTrue(active);
     }
 }

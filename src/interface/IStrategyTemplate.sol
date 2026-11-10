@@ -15,12 +15,6 @@ pragma solidity ^0.8.24;
  *
  * @notice All strategies must implement proper access controls and ensure only authorized callers
  * (typically the vault) can execute fund management operations.
- *
- * @notice For strategies that accrue rewards from underlying protocols:
- * The vault has an arbitrary call execution function that can call any target with arbitrary data.
- * This is primarily used to claim rewards from external reward systems. Strategies that earn rewards
- * should provide dedicated functions that can be called by the vault through this mechanism to claim
- * rewards and forward them to the rewards distributor system.
  */
 
 /**

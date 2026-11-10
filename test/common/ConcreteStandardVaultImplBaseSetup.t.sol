@@ -12,6 +12,7 @@ import {
 import {ERC20Mock} from "../mock/ERC20Mock.sol";
 import {AllocateModule} from "../../src/module/AllocateModule.sol";
 import {ConcreteV2RolesLib as RolesLib} from "../../src/lib/Roles.sol";
+import {IContractId} from "../../src/interface/IContractId.sol";
 
 contract ConcreteStandardVaultImplBaseSetup is TestBaseSetup {
     address public vaultOwner;
@@ -35,9 +36,10 @@ contract ConcreteStandardVaultImplBaseSetup is TestBaseSetup {
 
         asset = new ERC20Mock();
         allocateModule = new AllocateModule();
+        uint64 vaultImpl = uint64(IContractId(address(concreteStandardVaultImpl)).ID());
         concreteStandardVault = ConcreteStandardVaultImpl(
             factory.create(
-                1,
+                vaultImpl,
                 vaultOwner,
                 abi.encode(address(allocateModule), address(asset), vaultManager, "Concrete Standard Vault", "CSVault")
             )

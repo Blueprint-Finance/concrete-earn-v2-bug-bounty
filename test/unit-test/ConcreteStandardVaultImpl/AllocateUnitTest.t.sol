@@ -8,6 +8,8 @@ import {
 import {IAllocateModule} from "../../../src/interface/IAllocateModule.sol";
 import {ERC4626StrategyMock} from "../../mock/ERC4626StrategyMock.sol";
 import {AddStrategyWithDeallocationOrder} from "../../common/AddStrategyWithDeallocationOrder.sol";
+import {PausableUpgradeable} from "@openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
+import {ConcreteV2RolesLib as RolesLib} from "../../../src/lib/Roles.sol";
 
 contract AllocateUnitTest is ConcreteStandardVaultImplBaseSetup, AddStrategyWithDeallocationOrder {
     address public user1;
@@ -19,7 +21,7 @@ contract AllocateUnitTest is ConcreteStandardVaultImplBaseSetup, AddStrategyWith
 
         user1 = makeAddr("user1");
 
-        strategy = new ERC4626StrategyMock(address(asset));
+        strategy = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
 
         addStrategyWithDeallocationOrder(address(strategy), address(concreteStandardVault), allocator, strategyOperator);
 
@@ -84,5 +86,24 @@ contract AllocateUnitTest is ConcreteStandardVaultImplBaseSetup, AddStrategyWith
         strategyData = concreteStandardVault.getStrategyData(address(strategy));
         assertEq(strategyData.allocated, 0);
         assertEq(uint8(strategyData.status), uint8(IConcreteStandardVaultImpl.StrategyStatus.Active));
+    }
+
+    function testPausePreventsAllocate() public {
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteStandardVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteStandardVault.pause();
+
+        uint256 amount = concreteStandardVault.cachedTotalAssets();
+        bytes memory extraData = abi.encode(amount);
+        IAllocateModule.AllocateParams[] memory params = new IAllocateModule.AllocateParams[](1);
+        params[0] = IAllocateModule.AllocateParams({isDeposit: true, strategy: address(strategy), extraData: extraData});
+        bytes memory data = abi.encode(params);
+
+        vm.prank(allocator);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteStandardVault.allocate(data);
     }
 }

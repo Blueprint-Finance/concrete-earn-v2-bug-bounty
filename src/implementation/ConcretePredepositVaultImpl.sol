@@ -2,18 +2,22 @@
 pragma solidity ^0.8.24;
 
 import {ConcreteStandardVaultImpl} from "./ConcreteStandardVaultImpl.sol";
+import {IContractId} from "../interface/IContractId.sol";
 import {IConcreteStandardVaultImpl} from "../interface/IConcreteStandardVaultImpl.sol";
 import {IConcretePredepositVaultImpl} from "../interface/IConcretePredepositVaultImpl.sol";
+import {IDefaultEnforcedVaultConfiguration} from "../interface/IDefaultEnforcedVaultConfiguration.sol";
 import {
     ConcretePredepositVaultImplStorageLib as PDVLib
 } from "../lib/storage/ConcretePredepositVaultImplStorageLib.sol";
 import {ConcreteV2RolesLib as RolesLib} from "../lib/Roles.sol";
+import {StateInitLib} from "../lib/StateInitLib.sol";
 import {IPredepostVaultOApp} from "../periphery/interface/IPredepostVaultOApp.sol";
 import {ConcreteV2ConversionLib as ConversionLib} from "../lib/Conversion.sol";
 import {Math} from "@openzeppelin-contracts/utils/math/Math.sol";
 import {
     ConcreteCachedVaultStateStorageLib as CachedVaultStateLib
 } from "../lib/storage/ConcreteCachedVaultStateStorageLib.sol";
+import {ContractIdEncoding} from "../lib/ContractIdEncoding.sol";
 
 /**
  * @title ConcretePredepositVaultImpl
@@ -38,6 +42,14 @@ contract ConcretePredepositVaultImpl is ConcreteStandardVaultImpl, IConcretePred
     uint16 public constant MSG_TYPE_CLAIM = 1;
     uint16 public constant MSG_TYPE_BATCH_CLAIM = 2;
 
+    function FLAVOUR() public pure virtual override returns (uint256) {
+        return 3; // predeposit vault
+    }
+
+    function ID() public pure virtual override(ConcreteStandardVaultImpl) returns (uint64) {
+        return ContractIdEncoding.encode(CONTRACT_TYPE, FLAVOUR(), 1, 7, 0);
+    }
+
     /// @notice Event emitted when OApp address is set
     event OAppSet(address indexed oapp);
 
@@ -51,9 +63,15 @@ contract ConcretePredepositVaultImpl is ConcreteStandardVaultImpl, IConcretePred
      * @dev Initialization function that will be called when a proxy vault is deployed through `ConcreteFactory`.
      * @param initialVersion The initial version of the vault
      * @param owner The owner of the vault
+     * @param defaultEnforcedVaultConfig Default vault configuration from the factory
      * @param data Encoded initialization data (allocateModule, asset, initialVaultManager, name, symbol)
      */
-    function _initialize(uint64 initialVersion, address owner, bytes memory data) internal virtual override {
+    function _initialize(
+        uint64 initialVersion,
+        address owner,
+        IDefaultEnforcedVaultConfiguration.DefaultEnforcedVaultConfiguration calldata defaultEnforcedVaultConfig,
+        bytes memory data
+    ) internal virtual override {
         (
             address allocateModuleAddr,
             address asset,
@@ -64,7 +82,10 @@ contract ConcretePredepositVaultImpl is ConcreteStandardVaultImpl, IConcretePred
 
         // Call parent initialization
         super._initialize(
-            initialVersion, owner, abi.encode(allocateModuleAddr, asset, initialVaultManager, name, symbol)
+            initialVersion,
+            owner,
+            defaultEnforcedVaultConfig,
+            abi.encode(allocateModuleAddr, asset, initialVaultManager, name, symbol)
         );
 
         // Initialize self claims setting to false (can be enabled via setSelfClaimsEnabled)
@@ -73,7 +94,7 @@ contract ConcretePredepositVaultImpl is ConcreteStandardVaultImpl, IConcretePred
     }
 
     /// @inheritdoc IConcretePredepositVaultImpl
-    function claimOnTargetChain(bytes calldata options) external payable nonReentrant withYieldAccrual {
+    function claimOnTargetChain(bytes calldata options) external payable whenNotPaused nonReentrant withYieldAccrual {
         PDVLib.ConcretePredepositVaultImplStorage storage $ = PDVLib.fetch();
 
         // Ensure self claims are enabled
@@ -189,19 +210,15 @@ contract ConcretePredepositVaultImpl is ConcreteStandardVaultImpl, IConcretePred
      * @dev Sets selfClaimsEnabled to false by default (can be enabled via setSelfClaimsEnabled)
      */
     function _upgrade(
-        uint64,
-        /* oldVersion */
-        uint64,
-        /* newVersion */
-        bytes calldata /* data */
+        uint64, /* newVersion */
+        bytes calldata data
     )
         internal
         virtual
         override
+        whenNotPaused
     {
-        // Initialize self claims setting to false (can be enabled via setSelfClaimsEnabled)
-        PDVLib.ConcretePredepositVaultImplStorage storage $ = PDVLib.fetch();
-        $.selfClaimsEnabled = false;
+        StateInitLib.stateUpgradePredepositVaultImpl(data);
     }
 
     /**
@@ -213,11 +230,11 @@ contract ConcretePredepositVaultImpl is ConcreteStandardVaultImpl, IConcretePred
         require($.oapp != address(0), OAppNotSet());
 
         // Ensure deposits are locked
-        (uint256 maxDepositAmount,) = getDepositLimits();
-        require(maxDepositAmount == 0, DepositsNotLocked());
+        (uint256 maxGlobalDepositAmount,) = getDepositLimits();
+        require(maxGlobalDepositAmount == 0, DepositsNotLocked());
 
         // Ensure withdrawals are locked
-        (uint256 maxWithdrawAmount,) = getWithdrawLimits();
-        require(maxWithdrawAmount == 0, WithdrawalsNotLocked());
+        (uint256 maxTxWithdrawAmount,) = getWithdrawLimits();
+        require(maxTxWithdrawAmount == 0, WithdrawalsNotLocked());
     }
 }

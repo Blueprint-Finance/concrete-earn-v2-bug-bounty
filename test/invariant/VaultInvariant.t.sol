@@ -39,6 +39,24 @@ contract VaultInvariant is InvariantTestBase {
         assertEq(totalAssets, idleAssets + strategiesTotal, "INVARIANT: Asset conservation failed");
     }
 
+    /// @dev deallocationOrder ⊆ strategies (every strategy in deallocation order must be in the strategies set)
+    function invariant_deallocation_order_subset_of_strategies() public view {
+        address[] memory deallocationOrder = vault.getDeallocationOrder();
+        address[] memory strategies = vault.getStrategies();
+
+        for (uint256 i = 0; i < deallocationOrder.length; i++) {
+            address strategy = deallocationOrder[i];
+            bool found = false;
+            for (uint256 j = 0; j < strategies.length; j++) {
+                if (strategies[j] == strategy) {
+                    found = true;
+                    break;
+                }
+            }
+            assertTrue(found, "INVARIANT: deallocationOrder contains strategy not in strategies set");
+        }
+    }
+
     /// @dev Strategy allocation bounds
     function invariant_strategy_allocation_bounds() public view {
         uint256 totalAssets = vault.cachedTotalAssets();
@@ -59,19 +77,17 @@ contract VaultInvariant is InvariantTestBase {
         // Calculate what maxWithdraw should be: min(user assets, available liquidity)
         // Use previewAccrueYield for up-to-date total assets like maxWithdraw() does
         (uint256 expectedTotalAssets, uint256 totalSupply) = vault.previewAccrueYield();
-        uint256 userMaxAssets =
-            InvariantUtils.convertToAssets(userBalance, totalSupply, expectedTotalAssets, Math.Rounding.Floor);
 
         uint256 availableLiquidity = InvariantUtils.calculateAvailableLiquidity(vault);
-        uint256 expectedMaxWithdraw = userMaxAssets < availableLiquidity ? userMaxAssets : availableLiquidity;
 
         // Convert expected maxWithdraw back to shares using same math as vault
-        uint256 expectedMaxRedeem =
-            InvariantUtils.convertToShares(expectedMaxWithdraw, totalSupply, expectedTotalAssets, Math.Rounding.Floor);
+        uint256 availableLiquidityShares =
+            InvariantUtils.convertToShares(availableLiquidity, totalSupply, expectedTotalAssets, Math.Rounding.Floor);
 
+        uint256 expectedMaxRedeem = userBalance < availableLiquidityShares ? userBalance : availableLiquidityShares;
         // Check if vault has fees
-        (, uint16 managementFee,) = vault.managementFee();
-        (, uint16 performanceFee) = vault.performanceFee();
+        (uint16 managementFee,,, uint16 performanceFee,) = vault.getFeeConfig();
+
         bool hasFees = managementFee > 0 || performanceFee > 0;
 
         if (hasFees) {

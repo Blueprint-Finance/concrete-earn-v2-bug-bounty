@@ -3,6 +3,7 @@ pragma solidity ^0.8.0;
 
 import {IConcreteFactory, ConcreteFactoryBaseSetup, VaultProxy} from "./ConcreteFactoryBaseSetup.t.sol";
 import {IConcreteAsyncVaultImpl, ConcreteAsyncVaultImpl} from "../../src/implementation/ConcreteAsyncVaultImpl.sol";
+import {IContractId} from "../../src/interface/IContractId.sol";
 
 contract TestBaseAsyncSetup is ConcreteFactoryBaseSetup {
     ConcreteAsyncVaultImpl public concreteAsyncVaultImpl;
@@ -15,8 +16,8 @@ contract TestBaseAsyncSetup is ConcreteFactoryBaseSetup {
         vm.startPrank(factoryOwner);
         factory.approveImplementation(address(concreteAsyncVaultImpl));
         vm.stopPrank();
-
-        assertEq(factory.getImplementationByVersion(1), address(concreteAsyncVaultImpl));
+        uint64 contractId = uint64(IContractId(address(concreteAsyncVaultImpl)).ID());
+        assertEq(factory.getImplementationByVaultImpl(contractId), address(concreteAsyncVaultImpl));
 
         vm.label(address(factory), "factory");
         vm.label(address(factoryOwner), "factoryOwner");

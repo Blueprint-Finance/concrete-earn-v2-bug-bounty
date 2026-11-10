@@ -7,6 +7,7 @@ import {ERC4626StrategyMock} from "../../mock/ERC4626StrategyMock.sol";
 import {InvariantUtils} from "../../invariant/helpers/InvariantUtils.sol";
 import {Math} from "@openzeppelin-contracts/utils/math/Math.sol";
 import {AddStrategyWithDeallocationOrder} from "../../common/AddStrategyWithDeallocationOrder.sol";
+import {IConcreteStandardVaultImpl} from "../../../src/interface/IConcreteStandardVaultImpl.sol";
 
 contract PerformanceFeeFuzzTest is ConcreteStandardVaultImplBaseSetup, AddStrategyWithDeallocationOrder {
     address public user1;
@@ -21,7 +22,7 @@ contract PerformanceFeeFuzzTest is ConcreteStandardVaultImplBaseSetup, AddStrate
         performanceFeeRecipient = makeAddr("performanceFeeRecipient");
 
         // Create and add strategy
-        strategy = new ERC4626StrategyMock(address(asset));
+        strategy = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
         addStrategyWithDeallocationOrder(address(strategy), address(concreteStandardVault), allocator, strategyOperator);
 
         // Make initial deposit
@@ -45,7 +46,9 @@ contract PerformanceFeeFuzzTest is ConcreteStandardVaultImplBaseSetup, AddStrate
         concreteStandardVault.updatePerformanceFeeRecipient(performanceFeeRecipient);
 
         vm.prank(vaultManager);
-        concreteStandardVault.updatePerformanceFee(performanceFee);
+        concreteStandardVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.PerformanceFee, abi.encode(performanceFee)
+        );
 
         // Allocate funds to strategy using proper AllocateParams structure
         bytes memory extraData = abi.encode(allocateAmount);
@@ -80,6 +83,7 @@ contract PerformanceFeeFuzzTest is ConcreteStandardVaultImplBaseSetup, AddStrate
         assertEq(concreteStandardVault.balanceOf(performanceFeeRecipient), 0);
 
         // Accrue yield and verify performance fee
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
         uint256 actualShares = concreteStandardVault.balanceOf(performanceFeeRecipient);
 

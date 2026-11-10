@@ -14,6 +14,7 @@ import {IConcreteAsyncVaultImpl} from "../../src/interface/IConcreteAsyncVaultIm
 import {ERC20Mock} from "../mock/ERC20Mock.sol";
 import {AllocateModule} from "../../src/module/AllocateModule.sol";
 import {ConcreteV2RolesLib as RolesLib} from "../../src/lib/Roles.sol";
+import {IContractId} from "../../src/interface/IContractId.sol";
 
 contract ConcreteAsyncVaultImplBaseSetup is TestBaseAsyncSetup {
     address public vaultOwner;
@@ -39,9 +40,10 @@ contract ConcreteAsyncVaultImplBaseSetup is TestBaseAsyncSetup {
 
         asset = new ERC20Mock();
         allocateModule = new AllocateModule();
+        uint64 vaultImpl = uint64(IContractId(address(concreteAsyncVaultImpl)).ID());
         concreteAsyncVault = ConcreteAsyncVaultImpl(
             factory.create(
-                1,
+                vaultImpl,
                 vaultOwner,
                 abi.encode(address(allocateModule), address(asset), vaultManager, "Concrete Async Vault", "CAVault")
             )
@@ -65,6 +67,8 @@ contract ConcreteAsyncVaultImplBaseSetup is TestBaseAsyncSetup {
         concreteAsyncVault.grantRole(RolesLib.HOOK_MANAGER, hookManager);
         // grant withdrawal manager role to withdrawal manager
         concreteAsyncVault.grantRole(RolesLib.WITHDRAWAL_MANAGER, withdrawalManager);
+        // grant priority withdrawal executor role to withdrawal manager
+        concreteAsyncVault.grantRole(RolesLib.PRIORITY_WITHDRAWAL_EXECUTOR, withdrawalManager);
         vm.stopPrank();
     }
 }

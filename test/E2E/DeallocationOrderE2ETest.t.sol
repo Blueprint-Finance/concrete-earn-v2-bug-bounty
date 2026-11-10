@@ -25,9 +25,9 @@ contract DeallocationOrderE2ETest is ConcreteStandardVaultImplBaseSetup, AddStra
         user2 = makeAddr("user2");
 
         // Deploy strategies
-        strategy1 = new ERC4626StrategyMock(address(asset));
-        strategy2 = new ERC4626StrategyMock(address(asset));
-        strategy3 = new ERC4626StrategyMock(address(asset));
+        strategy1 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
+        strategy2 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
+        strategy3 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
 
         vm.label(address(strategy1), "strategy1");
         vm.label(address(strategy2), "strategy2");
@@ -168,7 +168,11 @@ contract DeallocationOrderE2ETest is ConcreteStandardVaultImplBaseSetup, AddStra
         }
     }
 
-    function testHaltedStrategyCanBeRemovedEvenInDeallocationOrder() public {
+    function testHaltedStrategyWithAllocationRemovedViaLossRealizationCleansOrder() public {
+        // Allocate some funds to strategy1 while it is Active (allocate skips Halted strategies)
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        _allocateToStrategy(address(strategy1), STRATEGY_ALLOCATION);
+
         // Halt strategy1
         vm.prank(strategyOperator);
         concreteStandardVault.toggleStrategyStatus(address(strategy1));
@@ -178,20 +182,99 @@ contract DeallocationOrderE2ETest is ConcreteStandardVaultImplBaseSetup, AddStra
             concreteStandardVault.getStrategyData(address(strategy1));
         assertEq(uint256(strategyData.status), uint256(IConcreteStandardVaultImpl.StrategyStatus.Halted));
 
-        // Allocate some funds to strategy1
-        _depositAsUser(user1, INITIAL_DEPOSIT);
-        _allocateToStrategy(address(strategy1), STRATEGY_ALLOCATION);
-
-        // Even though strategy1 is in deallocation order and has allocation,
-        // it should be removable because it's halted
+        // A Halted strategy that still holds an allocation cannot be removed directly; it must be
+        // reconciled first. Realizing the loss removes it and cleans the deallocation order too.
         vm.prank(strategyOperator);
-        concreteStandardVault.removeStrategy(address(strategy1));
+        concreteStandardVault.reconcileHaltedStrategy(address(strategy1), address(0));
 
         // Verify strategy1 was removed
         address[] memory strategies = concreteStandardVault.getStrategies();
         for (uint256 i = 0; i < strategies.length; i++) {
             assertTrue(strategies[i] != address(strategy1), "Strategy1 should be removed");
         }
+    }
+
+    /// @dev Verifies that removeStrategy removes ALL instances of a duplicated strategy from deallocation order
+    ///      while preserving relative order. E.g. [A,B,C,D,A,J] → [B,C,D,J] when removing A.
+    function testRemoveStrategyWithDuplicatesInDeallocationOrderPreservesOrder() public {
+        // Set deallocation order with strategy1 duplicated: [strategy1, strategy2, strategy3, strategy1]
+        address[] memory orderWithDuplicates = new address[](4);
+        orderWithDuplicates[0] = address(strategy1);
+        orderWithDuplicates[1] = address(strategy2);
+        orderWithDuplicates[2] = address(strategy3);
+        orderWithDuplicates[3] = address(strategy1);
+
+        vm.prank(allocator);
+        concreteStandardVault.setDeallocationOrder(orderWithDuplicates);
+
+        // Verify initial order
+        address[] memory initialOrder = concreteStandardVault.getDeallocationOrder();
+        assertEq(initialOrder.length, 4);
+        assertEq(initialOrder[0], address(strategy1));
+        assertEq(initialOrder[1], address(strategy2));
+        assertEq(initialOrder[2], address(strategy3));
+        assertEq(initialOrder[3], address(strategy1));
+
+        // Allocate to strategy1 while Active, then halt it; a Halted strategy with allocation is
+        // reconciled and removed via reconcileHaltedStrategy (which also cleans the order).
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        _allocateToStrategy(address(strategy1), STRATEGY_ALLOCATION);
+
+        vm.prank(strategyOperator);
+        concreteStandardVault.toggleStrategyStatus(address(strategy1));
+
+        // Remove strategy1 - should remove BOTH instances
+        vm.prank(strategyOperator);
+        concreteStandardVault.reconcileHaltedStrategy(address(strategy1), address(0));
+
+        // Verify all instances removed and order preserved: [strategy2, strategy3]
+        address[] memory deallocationOrder = concreteStandardVault.getDeallocationOrder();
+        assertEq(deallocationOrder.length, 2, "Should have 2 strategies after removing duplicated strategy1");
+        assertEq(deallocationOrder[0], address(strategy2), "First should be strategy2");
+        assertEq(deallocationOrder[1], address(strategy3), "Second should be strategy3");
+
+        // Double-check no strategy1 remains
+        for (uint256 i = 0; i < deallocationOrder.length; i++) {
+            assertTrue(
+                deallocationOrder[i] != address(strategy1), "Deallocation order must not contain removed strategy"
+            );
+        }
+    }
+
+    /// @dev Verifies invariant: deallocationOrder ⊆ strategies after strategy removal
+    function testDeallocationOrderInvariantAfterStrategyRemoval() public {
+        // Set deallocation order [strategy1, strategy2, strategy3]
+        address[] memory order = new address[](3);
+        order[0] = address(strategy1);
+        order[1] = address(strategy2);
+        order[2] = address(strategy3);
+
+        vm.prank(allocator);
+        concreteStandardVault.setDeallocationOrder(order);
+
+        // Allocate to strategy1 while Active, then halt and remove it (middle of order) via loss
+        // realization, since a Halted strategy with allocation can no longer be removed directly.
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        _allocateToStrategy(address(strategy1), STRATEGY_ALLOCATION);
+
+        vm.prank(strategyOperator);
+        concreteStandardVault.toggleStrategyStatus(address(strategy1));
+
+        vm.prank(strategyOperator);
+        concreteStandardVault.reconcileHaltedStrategy(address(strategy1), address(0));
+
+        // Invariant: deallocation order must not contain removed strategy
+        address[] memory deallocationOrder = concreteStandardVault.getDeallocationOrder();
+        for (uint256 i = 0; i < deallocationOrder.length; i++) {
+            assertTrue(
+                deallocationOrder[i] != address(strategy1), "Deallocation order must not contain removed strategy"
+            );
+        }
+
+        // Order of remaining strategies must be preserved: [strategy2, strategy3]
+        assertEq(deallocationOrder.length, 2, "Deallocation order should have 2 strategies");
+        assertEq(deallocationOrder[0], address(strategy2), "First in order should be strategy2");
+        assertEq(deallocationOrder[1], address(strategy3), "Second in order should be strategy3");
     }
 
     function testCannotAddHaltedStrategyToDeallocationOrder() public {

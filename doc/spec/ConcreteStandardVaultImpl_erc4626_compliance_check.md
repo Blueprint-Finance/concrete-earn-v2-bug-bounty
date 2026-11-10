@@ -81,7 +81,10 @@ MUST NOT revert.
 
 **implementation:**
 
-type(uint224).max
+- Returns 0 while the vault is paused
+- Preview yield accrual to get the expected up-to-date total assets
+- Returns 0 if deposits are disabled (`maxGlobalDepositAmount == 0`) or the global limit is reached
+- Otherwise returns the remaining capacity `maxGlobalDepositAmount - totalAssets`, or 0 if that is below `minTxDepositAmount`
 
 ### previewDeposit
 
@@ -113,7 +116,10 @@ MUST NOT revert.
 ```
 
 **implementation:**
-type(uint224).max
+
+- Returns 0 while the vault is paused
+- Takes the remaining deposit capacity from `maxDeposit` and converts it to shares (rounding down)
+- Returns 0 if converting those shares back to assets (rounding up, as `mint` does) lands below `minTxDepositAmount`
 
 ### previewMint
 
@@ -144,9 +150,11 @@ MUST NOT revert.
 
 **implementation:**
 
+- Returns 0 while the vault is paused
 - Get all user shares balance
 - Preview yield accrual to get expected up-to-date total assets and total supply (inclusive of fees)
 - Calculate the max amount of assets a user can get: shares * vault total deposited amount + strategies positive yield - strategies negative yield / vault totalSupply
+- Cap those assets at `maxTxWithdrawAmount`; 0 if withdrawals are disabled or the result is below `minTxWithdrawAmount`
 - Simulate a withdraw to check if the vault can fill the requested amount, either using idle funds or if underlying strategies are available to withdraw from, if the requested amount is un-fillable, return the max amount the vault can fill.
 
 ### previewWithdraw
@@ -178,12 +186,11 @@ MUST NOT revert.
 
 **implementation:**
 
-- Using maxWithdraw to:
-  - Get all user shares balance
-  - Preview yield accrual to get expected up-to-date total assets and total supply (inclusive of fees)
-  - Calculate the max amount of assets a user can get: shares * vault total deposited amount + strategies positive yield - strategies negative yield / vault totalSupply
-  - Simulate a withdraw to check if the vault can fill the requested amount, either using idle funds or if underlying strategies are available to withdraw from, if the requested amount is un-fillable, return the max amount the vault can fill.
-- Through maxWithdraw results, which are the max assets, expected total supply and expected total assets amounts, calculate: assets * expected vault totalSupply / expected vault total assets
+- Returns 0 while the vault is paused
+- Preview yield accrual to get expected up-to-date total assets and total supply (inclusive of fees)
+- Take the user's shares, capped by `maxTxWithdrawAmount` converted to shares (rounding down); 0 if withdrawals are disabled or the shares are worth less than `minTxWithdrawAmount`
+- Simulate a withdraw to get the liquidity the vault can provide (idle funds plus what strategies can return) and convert it to shares (rounding down); 0 if that is worth less than `minTxWithdrawAmount`
+- Return the smaller of the two share amounts
 
 ### previewRedeem
 

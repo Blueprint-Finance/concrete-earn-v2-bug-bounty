@@ -2,12 +2,14 @@
 pragma solidity ^0.8.24;
 
 import {BaseStrategy} from "./BaseStrategy.sol";
+import {ContractIdEncoding} from "../../lib/ContractIdEncoding.sol";
 import {BaseStrategyStorageLib as BaseStrategyStorage} from "../lib/BaseStrategyStorageLib.sol";
 import {MultisigStrategyStorageLib as MultisigStrategyStorage} from "../lib/MultisigStrategyStorageLib.sol";
 import {PositionAccountingStorageLib} from "../lib/PositionAccountingStorageLib.sol";
 import {PositionAccountingLib} from "../lib/PositionAccountingLib.sol";
 import {PeripheryRolesLib} from "../lib/PeripheryRolesLib.sol";
 import {StrategyType} from "../../interface/IStrategyTemplate.sol";
+import {IAsyncAccounting} from "../../interface/IAsyncAccounting.sol";
 import {IERC20} from "@openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {IERC4626} from "@openzeppelin-contracts/interfaces/IERC4626.sol";
 import {SafeERC20} from "@openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
@@ -23,7 +25,7 @@ import {SignedMath} from "@openzeppelin-contracts/utils/math/SignedMath.sol";
  *      them on withdrawal. It does not generate any rewards.
  * @dev Uses EIP-7201 storage layout for upgradeability.
  */
-contract MultisigStrategy is BaseStrategy {
+contract MultisigStrategy is BaseStrategy, IAsyncAccounting {
     using SafeERC20 for IERC20;
     using Math for uint256;
     using SafeCast for int256;
@@ -33,6 +35,11 @@ contract MultisigStrategy is BaseStrategy {
     /// @param multiSig The address of the multi-sig wallet
     /// @param newMultiSig The new address of the multi-sig wallet
     event MultiSigSet(address indexed multiSig, address indexed newMultiSig);
+
+    /// @notice Emitted when a multi-sig transfer is started (2-step propose).
+    /// @param multiSig The current (still active) multi-sig wallet
+    /// @param pendingMultiSig The proposed multi-sig wallet pending acceptance
+    event MultiSigTransferStarted(address indexed multiSig, address indexed pendingMultiSig);
 
     /// @notice Emitted when assets are forwarded to the multi-sig
     /// @param multiSig The address of the multi-sig wallet
@@ -56,6 +63,8 @@ contract MultisigStrategy is BaseStrategy {
     error InvalidMultiSigAddress();
     error InsufficientUnderlyingBalance();
     error NotAdminOrOperator();
+    /// @notice Thrown when `acceptMultiSig` is called by an address other than the pending multi-sig.
+    error NotPendingMultiSig();
 
     /// @notice Modifier to ensure only admin or operator can call functions
     modifier onlyAdminOrOperator() {
@@ -66,6 +75,18 @@ contract MultisigStrategy is BaseStrategy {
             revert NotAdminOrOperator();
         }
         _;
+    }
+
+    function FLAVOUR() public pure virtual returns (uint256) {
+        return 2; // multisig strategy
+    }
+
+    /**
+     * @notice Returns the contract ID
+     * @return The contract ID
+     */
+    function ID() public pure virtual override(BaseStrategy) returns (uint64) {
+        return ContractIdEncoding.encode(CONTRACT_TYPE, FLAVOUR(), 1, 6, 0);
     }
 
     /**
@@ -83,6 +104,8 @@ contract MultisigStrategy is BaseStrategy {
      * @param maxAccountingChangeThreshold_ The maximum accounting change threshold in basis points
      * @param accountingValidityPeriod_ The accounting validity period in seconds
      * @param cooldownPeriod_ The update cooldown period in seconds
+     * @param timelock_ Address of the Timelock contract. Pass `address(0)` to
+     *                  deploy without timelock enforcement.
      */
     function initialize(
         address admin,
@@ -90,18 +113,42 @@ contract MultisigStrategy is BaseStrategy {
         address multiSig_,
         uint64 maxAccountingChangeThreshold_,
         uint64 accountingValidityPeriod_,
-        uint64 cooldownPeriod_
+        uint64 cooldownPeriod_,
+        address timelock_
     ) external initializer {
+        __MultisigStrategy_init(
+            admin,
+            vault_,
+            multiSig_,
+            maxAccountingChangeThreshold_,
+            accountingValidityPeriod_,
+            cooldownPeriod_,
+            timelock_
+        );
+    }
+
+    function __MultisigStrategy_init(
+        address admin,
+        address vault_,
+        address multiSig_,
+        uint64 maxAccountingChangeThreshold_,
+        uint64 accountingValidityPeriod_,
+        uint64 cooldownPeriod_,
+        address timelock_
+    ) internal onlyInitializing {
         if (multiSig_ == address(0)) revert InvalidMultiSigAddress();
-        if (cooldownPeriod_ >= accountingValidityPeriod_) {
+        if (cooldownPeriod_ < PositionAccountingLib.MIN_COOLDOWN_PERIOD) {
             revert PositionAccountingLib.InvalidCooldownPeriod();
         }
-        if (maxAccountingChangeThreshold_ > PositionAccountingLib.BASIS_POINTS) {
+        if (accountingValidityPeriod_ < cooldownPeriod_ + PositionAccountingLib.MIN_PERIOD_DIFFERENCE) {
+            revert PositionAccountingLib.InvalidAccountingValidityPeriod();
+        }
+        if (maxAccountingChangeThreshold_ > PositionAccountingLib.MAX_ACCOUNTING_CHANGE_THRESHOLD_CAP) {
             revert PositionAccountingLib.InvalidMaxAccountingChangeThreshold();
         }
 
         // Initialize BaseStrategy first
-        _initializeBaseStrategy(admin, vault_);
+        __BaseStrategy_init(admin, vault_, timelock_);
 
         // Initialize MultisigStrategyStorage
         MultisigStrategyStorage.initialize(multiSig_);
@@ -124,6 +171,16 @@ contract MultisigStrategy is BaseStrategy {
         MultisigStrategyStorage.MultisigStrategyStorage storage multisigStrategyStorage =
             MultisigStrategyStorage.fetch();
         return multisigStrategyStorage.multiSig;
+    }
+
+    /**
+     * @notice Returns the proposed multi-sig wallet pending acceptance.
+     * @return The address of the pending multi-sig wallet (zero if none pending)
+     */
+    function getPendingMultiSig() external view returns (address) {
+        MultisigStrategyStorage.MultisigStrategyStorage storage multisigStrategyStorage =
+            MultisigStrategyStorage.fetch();
+        return multisigStrategyStorage.pendingMultiSig;
     }
 
     /**
@@ -189,16 +246,34 @@ contract MultisigStrategy is BaseStrategy {
      */
 
     /**
-     * @notice Sets the address of the multi-signature wallet
-     * @param multiSig_ The address of the multi-signature wallet
-     * @dev The multiSig must approve this contract to pull funds for withdrawals
+     * @notice Proposes a new multi-signature wallet (first step of a 2-step transfer).
+     * @param multiSig_ The address of the proposed multi-signature wallet
+     * @dev Mirrors {Ownable2Step-transferOwnership}: this only records the pending
+     *      multi-sig; the active multi-sig is unchanged until {acceptMultiSig} is
+     *      called by `multiSig_`. Calling again overwrites any pending proposal.
+     * @dev The multiSig must approve this contract to pull funds for withdrawals.
      */
-    function setMultiSig(address multiSig_) external onlyRole(PeripheryRolesLib.STRATEGY_ADMIN) {
+    function setMultiSig(address multiSig_) external onlyRole(PeripheryRolesLib.STRATEGY_ADMIN) afterDelay {
         if (multiSig_ == address(0)) revert InvalidMultiSigAddress();
         MultisigStrategyStorage.MultisigStrategyStorage storage multisigStrategyStorage =
             MultisigStrategyStorage.fetch();
-        emit MultiSigSet(multisigStrategyStorage.multiSig, multiSig_);
-        multisigStrategyStorage.multiSig = multiSig_;
+        multisigStrategyStorage.pendingMultiSig = multiSig_;
+        emit MultiSigTransferStarted(multisigStrategyStorage.multiSig, multiSig_);
+    }
+
+    /**
+     * @notice Accepts a pending multi-sig transfer (second step of a 2-step transfer).
+     * @dev Mirrors {Ownable2Step-acceptOwnership}: callable only by the pending
+     *      multi-sig. Finalizes the transfer and clears the pending slot. Not
+     *      timelock-gated; the delay is enforced on {setMultiSig}.
+     */
+    function acceptMultiSig() external {
+        MultisigStrategyStorage.MultisigStrategyStorage storage multisigStrategyStorage =
+            MultisigStrategyStorage.fetch();
+        require(msg.sender == multisigStrategyStorage.pendingMultiSig, NotPendingMultiSig());
+        emit MultiSigSet(multisigStrategyStorage.multiSig, msg.sender);
+        multisigStrategyStorage.multiSig = msg.sender;
+        delete multisigStrategyStorage.pendingMultiSig;
     }
 
     /**
@@ -208,6 +283,7 @@ contract MultisigStrategy is BaseStrategy {
     function setMaxAccountingChangeThreshold(uint64 maxAccountingChangeThreshold_)
         external
         onlyRole(PeripheryRolesLib.STRATEGY_ADMIN)
+        afterDelay
     {
         PositionAccountingLib.setMaxAccountingChangeThreshold(maxAccountingChangeThreshold_);
     }
@@ -227,7 +303,7 @@ contract MultisigStrategy is BaseStrategy {
      * @notice Sets the accounting update cooldown period
      * @param cooldownPeriod_ The new update cooldown period in seconds
      */
-    function setCooldownPeriod(uint64 cooldownPeriod_) external onlyRole(PeripheryRolesLib.STRATEGY_ADMIN) {
+    function setCooldownPeriod(uint64 cooldownPeriod_) external onlyRole(PeripheryRolesLib.STRATEGY_ADMIN) afterDelay {
         PositionAccountingLib.setCooldownPeriod(cooldownPeriod_);
     }
 
@@ -264,6 +340,16 @@ contract MultisigStrategy is BaseStrategy {
         }
 
         // Adjust the total assets
+        _adjustTotalAssets(diff);
+    }
+
+    /**
+     * @notice Vault-initiated accounting adjustment (e.g. recording an unwind cost).
+     * @dev Callable only by the bound vault. Bypasses nonce / threshold / cooldown
+     *      checks because the vault is a trusted caller.
+     * @param diff Signed delta applied to the strategy's vaultDepositedAmount.
+     */
+    function adjustTotalAssets(int256 diff) external override onlyVault {
         _adjustTotalAssets(diff);
     }
 

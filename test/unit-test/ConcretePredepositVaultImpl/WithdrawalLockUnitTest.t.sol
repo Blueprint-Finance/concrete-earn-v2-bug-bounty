@@ -6,6 +6,8 @@ import {IConcretePredepositVaultImpl} from "../../../src/interface/IConcretePred
 import {IConcreteStandardVaultImpl} from "../../../src/interface/IConcreteStandardVaultImpl.sol";
 import {IAccessControl} from "@openzeppelin-contracts/access/IAccessControl.sol";
 import {ConcreteV2RolesLib as RolesLib} from "../../../src/lib/Roles.sol";
+import {ERC4626Upgradeable} from "@openzeppelin-upgradeable/token/ERC20/extensions/ERC4626Upgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
 
 contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
     address public user1;
@@ -51,7 +53,7 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
         vm.expectEmit(true, true, true, true);
         emit WithdrawLimitsUpdated(0, 0);
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
 
         (uint256 maxWithdraw, uint256 minWithdraw) = predepositVault.getWithdrawLimits();
         assertEq(maxWithdraw, 0, "Max withdraw should be 0");
@@ -61,7 +63,9 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
         vm.expectEmit(true, true, true, true);
         emit WithdrawLimitsUpdated(type(uint256).max, 0);
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, type(uint256).max);
+        predepositVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, type(uint256).max)
+        );
 
         (maxWithdraw, minWithdraw) = predepositVault.getWithdrawLimits();
         assertEq(maxWithdraw, type(uint256).max, "Max withdraw should be unlimited");
@@ -76,11 +80,11 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
             )
         );
         vm.prank(user1);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
 
         // Try with vault manager (should succeed)
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
 
         (uint256 maxWithdraw,) = predepositVault.getWithdrawLimits();
         assertEq(maxWithdraw, 0, "Max withdraw should be 0");
@@ -89,12 +93,13 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
     function testWithdrawWhenLocked() public {
         // Lock withdrawals by setting max withdraw to 0
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
 
         // Try to withdraw (should fail)
         vm.expectRevert(
-            abi.encodeWithSelector(IConcreteStandardVaultImpl.AssetAmountOutOfBounds.selector, user1, 1000e18, 0, 0)
+            abi.encodeWithSelector(ERC4626Upgradeable.ERC4626ExceededMaxWithdraw.selector, user1, 1000e18, 0)
         );
+
         vm.prank(user1);
         predepositVault.withdraw(1000e18, user1, user1);
     }
@@ -121,13 +126,11 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
 
         // Lock withdrawals by setting max withdraw to 0
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
 
         // Try to redeem (should fail)
         vm.expectRevert(
-            abi.encodeWithSelector(
-                IConcreteStandardVaultImpl.AssetAmountOutOfBounds.selector, user1, expectedAssets, 0, 0
-            )
+            abi.encodeWithSelector(ERC4626Upgradeable.ERC4626ExceededMaxRedeem.selector, user1, expectedAssets, 0)
         );
         vm.prank(user1);
         predepositVault.redeem(sharesToRedeem, user1, user1);
@@ -178,7 +181,7 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
     function testDepositStillWorksWhenWithdrawalsDisabled() public {
         // Disable withdrawals by setting max withdraw to 0
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
 
         // Deposits should still work
         uint256 sharesBefore = predepositVault.balanceOf(user1);
@@ -196,7 +199,7 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
     function testMintStillWorksWhenWithdrawalsDisabled() public {
         // Disable withdrawals by setting max withdraw to 0
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
 
         // Mints should still work
         uint256 sharesBefore = predepositVault.balanceOf(user1);
@@ -214,11 +217,13 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
     function testWithdrawAfterRestoringLimits() public {
         // Disable withdrawals
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
 
         // Restore normal limits
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, type(uint256).max);
+        predepositVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, type(uint256).max)
+        );
 
         // Now withdraw should work
         uint256 balanceBefore = asset.balanceOf(user1);
@@ -235,11 +240,13 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
 
         // Disable withdrawals
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
 
         // Restore normal limits
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, type(uint256).max);
+        predepositVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, type(uint256).max)
+        );
 
         // Now redeem should work
         uint256 balanceBefore = asset.balanceOf(user1);
@@ -255,18 +262,17 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
     function testMultipleUsersCannotWithdrawWhenLocked() public {
         // Disable withdrawals
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, 0);
-
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
         // User1 cannot withdraw
         vm.expectRevert(
-            abi.encodeWithSelector(IConcreteStandardVaultImpl.AssetAmountOutOfBounds.selector, user1, 100e18, 0, 0)
+            abi.encodeWithSelector(ERC4626Upgradeable.ERC4626ExceededMaxWithdraw.selector, user1, 100e18, 0)
         );
         vm.prank(user1);
         predepositVault.withdraw(100e18, user1, user1);
 
         // User2 cannot withdraw
         vm.expectRevert(
-            abi.encodeWithSelector(IConcreteStandardVaultImpl.AssetAmountOutOfBounds.selector, user2, 100e18, 0, 0)
+            abi.encodeWithSelector(ERC4626Upgradeable.ERC4626ExceededMaxWithdraw.selector, user2, 100e18, 0)
         );
         vm.prank(user2);
         predepositVault.withdraw(100e18, user2, user2);
@@ -277,7 +283,7 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
 
         // Disable withdrawals
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
 
         // Preview should still work (it's a view function)
         uint256 previewLocked = predepositVault.previewWithdraw(1000e18);
@@ -292,12 +298,25 @@ contract WithdrawalLockUnitTest is ConcretePredepositVaultImplBaseSetup {
 
         // Disable withdrawals
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
 
         // Preview should still work (it's a view function)
         uint256 previewLocked = predepositVault.previewRedeem(sharesToPreview);
 
         // Preview results should be the same
         assertEq(previewLocked, previewUnlocked, "Preview should still work when locked");
+    }
+
+    function testPausePreventsDeposit() public {
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        predepositVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        predepositVault.pause();
+
+        vm.prank(user1);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        predepositVault.deposit(1000e18, user1);
     }
 }

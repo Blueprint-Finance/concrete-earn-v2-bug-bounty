@@ -30,9 +30,9 @@ contract WithdrawFromAllocatedVaultE2ETest is ConcreteStandardVaultImplBaseSetup
         user3 = makeAddr("user3");
 
         // Deploy strategies
-        strategy1 = new ERC4626StrategyMock(address(asset));
-        strategy2 = new ERC4626StrategyMock(address(asset));
-        strategy3 = new ERC4626StrategyMock(address(asset));
+        strategy1 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
+        strategy2 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
+        strategy3 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
 
         vm.label(address(strategy1), "strategy1");
         vm.label(address(strategy2), "strategy2");
@@ -451,5 +451,88 @@ contract WithdrawFromAllocatedVaultE2ETest is ConcreteStandardVaultImplBaseSetup
 
         vm.prank(allocator);
         concreteStandardVault.allocate(deallocateData);
+    }
+
+    // ─── ERC4626 compliance: maxWithdraw/maxRedeem vs minTxWithdrawAmount ───
+
+    /// @notice When strategy liquidity >= minTxWithdrawAmount, withdraw(maxWithdraw()) must succeed.
+    function testMaxWithdrawERC4626ComplianceWithSufficientLiquidity() public {
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        _allocateToStrategy(address(strategy1), INITIAL_DEPOSIT);
+
+        vm.prank(vaultManager);
+        concreteStandardVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(200e18, type(uint256).max)
+        );
+
+        uint256 maxW = concreteStandardVault.maxWithdraw(user1);
+        assertGe(maxW, 200e18, "maxWithdraw should be >= minTxWithdrawAmount when liquidity is sufficient");
+
+        vm.prank(user1);
+        concreteStandardVault.withdraw(maxW, user1, user1);
+    }
+
+    /// @notice When strategy liquidity >= minTxWithdrawAmount, redeem(maxRedeem()) must succeed.
+    function testMaxRedeemERC4626ComplianceWithSufficientLiquidity() public {
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        _allocateToStrategy(address(strategy1), INITIAL_DEPOSIT);
+
+        vm.prank(vaultManager);
+        concreteStandardVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(200e18, type(uint256).max)
+        );
+
+        uint256 maxR = concreteStandardVault.maxRedeem(user1);
+        assertGt(maxR, 0, "maxRedeem should be > 0 when liquidity is sufficient");
+
+        vm.prank(user1);
+        concreteStandardVault.redeem(maxR, user1, user1);
+    }
+
+    /// @notice When available liquidity < minTxWithdrawAmount, maxWithdraw must return 0
+    ///         so that withdraw(maxWithdraw()) never reverts (ERC4626 guarantee).
+    function testMaxWithdrawReturnsZeroWhenLiquidityBelowMinimum() public {
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        _allocateToStrategy(address(strategy1), INITIAL_DEPOSIT);
+
+        uint256 minWithdraw = 200e18;
+        vm.prank(vaultManager);
+        concreteStandardVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(minWithdraw, type(uint256).max)
+        );
+
+        uint256 limitedLiquidity = 100e18;
+        vm.mockCall(
+            address(strategy1), abi.encodeWithSelector(strategy1.maxWithdraw.selector), abi.encode(limitedLiquidity)
+        );
+
+        uint256 maxW = concreteStandardVault.maxWithdraw(user1);
+
+        // ERC4626: if maxWithdraw() > 0, withdraw(maxWithdraw()) MUST NOT revert.
+        // Since available liquidity (100e18) < minTxWithdrawAmount (200e18),
+        // maxWithdraw should return 0 to honour this guarantee.
+        assertEq(maxW, 0, "maxWithdraw should return 0 when available liquidity < minTxWithdrawAmount");
+    }
+
+    /// @notice When available liquidity < minTxWithdrawAmount, maxRedeem must return 0
+    ///         so that redeem(maxRedeem()) never reverts (ERC4626 guarantee).
+    function testMaxRedeemReturnsZeroWhenLiquidityBelowMinimum() public {
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        _allocateToStrategy(address(strategy1), INITIAL_DEPOSIT);
+
+        uint256 minWithdraw = 200e18;
+        vm.prank(vaultManager);
+        concreteStandardVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(minWithdraw, type(uint256).max)
+        );
+
+        uint256 limitedLiquidity = 100e18;
+        vm.mockCall(
+            address(strategy1), abi.encodeWithSelector(strategy1.maxWithdraw.selector), abi.encode(limitedLiquidity)
+        );
+
+        uint256 maxR = concreteStandardVault.maxRedeem(user1);
+
+        assertEq(maxR, 0, "maxRedeem should return 0 when available liquidity < minTxWithdrawAmount");
     }
 }

@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {ConcretePredepositVaultImplBaseSetup} from "../../common/ConcretePredepositVaultImplBaseSetup.t.sol";
 import {ConcretePredepositVaultImpl} from "../../../src/implementation/ConcretePredepositVaultImpl.sol";
 import {IConcretePredepositVaultImpl} from "../../../src/interface/IConcretePredepositVaultImpl.sol";
+import {IContractId} from "../../../src/interface/IContractId.sol";
 import {IPredepostVaultOApp} from "../../../src/periphery/interface/IPredepostVaultOApp.sol";
 import {MessagingFee} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 import {OptionsBuilder} from "@layerzerolabs/oapp-evm/contracts/oapp/libs/OptionsBuilder.sol";
@@ -11,6 +12,7 @@ import {ERC4626StrategyMock} from "../../mock/ERC4626StrategyMock.sol";
 import {IAllocateModule} from "../../../src/interface/IAllocateModule.sol";
 import {IAccessControl} from "@openzeppelin-contracts/access/IAccessControl.sol";
 import {ConcreteV2RolesLib as RolesLib} from "../../../src/lib/Roles.sol";
+import {IConcreteStandardVaultImpl} from "../../../src/interface/IConcreteStandardVaultImpl.sol";
 
 contract SelfClaimsToggleUnitTest is ConcretePredepositVaultImplBaseSetup {
     using OptionsBuilder for bytes;
@@ -45,7 +47,7 @@ contract SelfClaimsToggleUnitTest is ConcretePredepositVaultImplBaseSetup {
         asset.approve(address(predepositVault), 10000e18);
 
         // Deploy and setup strategy
-        strategy = new ERC4626StrategyMock(address(asset));
+        strategy = new ERC4626StrategyMock(address(asset), address(predepositVault));
         vm.prank(strategyOperator);
         predepositVault.addStrategy(address(strategy));
 
@@ -71,8 +73,8 @@ contract SelfClaimsToggleUnitTest is ConcretePredepositVaultImplBaseSetup {
 
         // Lock deposits and withdrawals before allowing claims
         vm.startPrank(vaultManager);
-        predepositVault.setDepositLimits(0, 0);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.DepositLimits, abi.encode(0, 0));
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
         vm.stopPrank();
     }
 
@@ -266,9 +268,12 @@ contract SelfClaimsToggleUnitTest is ConcretePredepositVaultImplBaseSetup {
 
     function test_initializationDefaultsSelfClaimsDisabled() public {
         // Deploy a new vault - selfClaimsEnabled should default to false
+        uint64 predepositVaultImpl = uint64(IContractId(address(predepositVault)).ID());
         ConcretePredepositVaultImpl newVault = ConcretePredepositVaultImpl(
             factory.create(
-                2, vaultOwner, abi.encode(address(allocateModule), address(asset), vaultManager, "Test Vault", "TV")
+                predepositVaultImpl,
+                vaultOwner,
+                abi.encode(address(allocateModule), address(asset), vaultManager, "Test Vault", "TV")
             )
         );
 
