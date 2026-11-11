@@ -12,6 +12,7 @@ import {Origin} from "@layerzerolabs/oapp-evm/contracts/oapp/OApp.sol";
 import {OptionsBuilder} from "@layerzerolabs/oapp-evm/contracts/oapp/libs/OptionsBuilder.sol";
 import {IERC20} from "@openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {ERC1967Proxy} from "@openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {IContractId} from "../../../src/interface/IContractId.sol";
 
 /**
  * @title ShareDistributorTest
@@ -25,6 +26,7 @@ contract ShareDistributorTest is Test, TestHelperOz5 {
     uint32 public constant B_EID = 2; // Destination chain
 
     ShareDistributor public distributor;
+    ConcreteStandardVaultImpl internal vaultImpl;
     ConcreteStandardVaultImpl public vault;
     ConcreteFactory public factory;
     AllocateModule public allocateModule;
@@ -63,21 +65,32 @@ contract ShareDistributorTest is Test, TestHelperOz5 {
         vm.prank(factoryOwner);
         address factoryImpl = address(new ConcreteFactory());
         factory = ConcreteFactory(
-            address(new ERC1967Proxy(factoryImpl, abi.encodeCall(ConcreteFactory.initialize, (factoryOwner))))
+            address(
+                new ERC1967Proxy(factoryImpl, abi.encodeCall(ConcreteFactory.initialize, (factoryOwner, address(0))))
+            )
+        );
+
+        // Set default configuration
+        vm.prank(factoryOwner);
+        factory.setDefaultEnforcedVaultConfiguration(
+            makeAddr("defaultManagementFeeRecipient"), makeAddr("defaultPerformanceFeeRecipient")
         );
 
         allocateModule = new AllocateModule();
         asset = new ERC20Mock();
 
         // Deploy standard vault implementation and approve it
-        ConcreteStandardVaultImpl vaultImpl = new ConcreteStandardVaultImpl(address(factory));
+        vaultImpl = new ConcreteStandardVaultImpl(address(factory));
         vm.prank(factoryOwner);
         factory.approveImplementation(address(vaultImpl));
 
         // Create vault on chain B (destination chain)
+        uint64 vaultImpl = uint64(IContractId(address(vaultImpl)).ID());
         vault = ConcreteStandardVaultImpl(
             factory.create(
-                1, vaultManager, abi.encode(address(allocateModule), address(asset), vaultManager, "Test Vault", "TVT")
+                vaultImpl,
+                vaultManager,
+                abi.encode(address(allocateModule), address(asset), vaultManager, "Test Vault", "TVT")
             )
         );
 
@@ -153,9 +166,12 @@ contract ShareDistributorTest is Test, TestHelperOz5 {
 
     function test_setTargetVault_updatesVault() public {
         // Deploy a new vault
+        uint64 vaultImpl = uint64(IContractId(address(vaultImpl)).ID());
         ConcreteStandardVaultImpl newVault = ConcreteStandardVaultImpl(
             factory.create(
-                1, vaultManager, abi.encode(address(allocateModule), address(asset), vaultManager, "New Vault", "NVT")
+                vaultImpl,
+                vaultManager,
+                abi.encode(address(allocateModule), address(asset), vaultManager, "New Vault", "NVT")
             )
         );
 
@@ -166,9 +182,12 @@ contract ShareDistributorTest is Test, TestHelperOz5 {
     }
 
     function test_setTargetVault_emitsEvent() public {
+        uint64 vaultImpl = uint64(IContractId(address(vaultImpl)).ID());
         ConcreteStandardVaultImpl newVault = ConcreteStandardVaultImpl(
             factory.create(
-                1, vaultManager, abi.encode(address(allocateModule), address(asset), vaultManager, "New Vault", "NVT")
+                vaultImpl,
+                vaultManager,
+                abi.encode(address(allocateModule), address(asset), vaultManager, "New Vault", "NVT")
             )
         );
 
@@ -186,9 +205,12 @@ contract ShareDistributorTest is Test, TestHelperOz5 {
     }
 
     function test_setTargetVault_revertsForNonOwner() public {
+        uint64 vaultImpl = uint64(IContractId(address(vaultImpl)).ID());
         ConcreteStandardVaultImpl newVault = ConcreteStandardVaultImpl(
             factory.create(
-                1, vaultManager, abi.encode(address(allocateModule), address(asset), vaultManager, "New Vault", "NVT")
+                vaultImpl,
+                vaultManager,
+                abi.encode(address(allocateModule), address(asset), vaultManager, "New Vault", "NVT")
             )
         );
 
@@ -811,4 +833,3 @@ contract ShareDistributorTest is Test, TestHelperOz5 {
         assertEq(distributor.MSG_TYPE_BATCH_CLAIM(), 2, "MSG_TYPE_BATCH_CLAIM should be 2");
     }
 }
-

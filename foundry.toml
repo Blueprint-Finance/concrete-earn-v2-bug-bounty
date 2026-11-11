@@ -3,12 +3,12 @@ src = "src"
 out = "out"
 libs = ["lib", "node_modules"]
 test = "test"
-optimizer_runs = 190
+optimizer_runs = 100
 solc = "0.8.27"
 gas_reports = ["*"]
 fs_permissions = [
-    { access = "read", path = "./"},
-    { access = "read-write", path = "./deployment-scripts/"}
+    { access = "read", path = "./" },
+    { access = "read-write", path = "./deployment-scripts/" },
 ]
 via_ir = false
 ffi = true
@@ -16,9 +16,14 @@ ast = true
 build_info = true
 extra_output = ["storageLayout"]
 
-[profile.lint]
-severity = ["high", "med"]  
+[lint]
+severity = []
 lint_on_build = true
+
+
+[profile.ci]
+# CI sets FOUNDRY_PROFILE=ci; without this section some forge versions fall back
+# to hardcoded defaults (e.g. optimizer_runs=200) instead of [profile.default].
 
 [profile.test]
 no_match_test = "(invariant_)"
@@ -40,7 +45,7 @@ show_solidity = true
 via_ir = true
 no_match_test = "(invariant_)"
 no_match_contract = "(Script)"
-no_match_coverage= "(script|test|fuzz|e2e)"
+no_match_coverage = "(script|test|fuzz|e2e)"
 
 [profile.coverage.optimizer_details]
 constantOptimizer = true

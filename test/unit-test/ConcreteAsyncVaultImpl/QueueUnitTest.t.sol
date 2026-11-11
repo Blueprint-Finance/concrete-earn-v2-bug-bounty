@@ -20,6 +20,7 @@ import {ConcreteV2RolesLib as RolesLib} from "../../../src/lib/Roles.sol";
 import {IConcreteStandardVaultImpl} from "../../../src/interface/IConcreteStandardVaultImpl.sol";
 
 import {console2 as console} from "forge-std/Test.sol";
+import {PausableUpgradeable} from "@openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
 
 contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallocationOrder {
     address public user1;
@@ -116,6 +117,31 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
         assertEq(concreteAsyncVault.totalRequestedSharesPerEpoch(currentEpoch), withdrawAmount);
     }
 
+    function testSweepDonatedTokensCannotDrainQueuedShareEscrow() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 currentEpoch = concreteAsyncVault.latestEpochID();
+        address sweepRecipient = makeAddr("sweepRecipient");
+
+        // A queued withdrawal escrows the user's shares into the vault (address(this)).
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+        assertEq(concreteAsyncVault.balanceOf(address(concreteAsyncVault)), withdrawAmount, "shares escrowed");
+
+        // Sweeping the vault share token must revert instead of draining the escrow.
+        vm.prank(vaultManager);
+        vm.expectRevert(IConcreteStandardVaultImpl.CannotSweepShareToken.selector);
+        concreteAsyncVault.sweepDonatedTokens(address(concreteAsyncVault), sweepRecipient);
+
+        // Escrow is intact, so the user can still cancel and recover the shares.
+        assertEq(concreteAsyncVault.balanceOf(address(concreteAsyncVault)), withdrawAmount, "escrow untouched");
+        assertEq(concreteAsyncVault.balanceOf(sweepRecipient), 0, "nothing swept");
+
+        vm.prank(user1);
+        concreteAsyncVault.cancelRequest(currentEpoch);
+        assertEq(concreteAsyncVault.balanceOf(user1), initialDepositAmount, "shares returned on cancel");
+        assertEq(concreteAsyncVault.getUserEpochRequest(user1, currentEpoch), 0, "request cleared");
+    }
+
     function testCancelRequestPlain() public {
         uint256 withdrawAmount = 100000e18;
         uint256 currentEpoch = concreteAsyncVault.latestEpochID();
@@ -135,6 +161,63 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
         // Check that request was cleared
         assertEq(concreteAsyncVault.getUserEpochRequest(user1, currentEpoch), 0);
         assertEq(concreteAsyncVault.totalRequestedSharesPerEpoch(currentEpoch), 0);
+    }
+
+    function testCancellationEnabledDefaultsTrue() public view {
+        assertTrue(concreteAsyncVault.cancellationEnabled());
+    }
+
+    function testConfigureDisablesCancellation() public {
+        vm.expectEmit(true, true, true, true);
+        emit IConcreteAsyncVaultImpl.CancellationEnabledSet(false);
+        vm.prank(vaultManager);
+        concreteAsyncVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.CancellationEnabled, abi.encode(false)
+        );
+
+        assertFalse(concreteAsyncVault.cancellationEnabled());
+    }
+
+    function testCancelRequestRevertsWhenCancellationDisabled() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 currentEpoch = concreteAsyncVault.latestEpochID();
+
+        // Create a pending request while cancellation is still enabled.
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        // Disable cancellation.
+        vm.prank(vaultManager);
+        concreteAsyncVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.CancellationEnabled, abi.encode(false)
+        );
+
+        // Cancelling is now blocked.
+        vm.expectRevert(IConcreteAsyncVaultImpl.CancellationDisabled.selector);
+        vm.prank(user1);
+        concreteAsyncVault.cancelRequest(currentEpoch);
+    }
+
+    function testConfigureReenablesCancellation() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 currentEpoch = concreteAsyncVault.latestEpochID();
+
+        vm.startPrank(vaultManager);
+        concreteAsyncVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.CancellationEnabled, abi.encode(false)
+        );
+        concreteAsyncVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.CancellationEnabled, abi.encode(true)
+        );
+        vm.stopPrank();
+        assertTrue(concreteAsyncVault.cancellationEnabled());
+
+        // Re-enabled: cancel works again.
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+        vm.prank(user1);
+        concreteAsyncVault.cancelRequest(currentEpoch);
+        assertEq(concreteAsyncVault.getUserEpochRequest(user1, currentEpoch), 0);
     }
 
     function testCancelRequestEpochAlreadyClosed() public {
@@ -230,7 +313,7 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
     }
 
     function testProcessEpochFundsAllocated() public {
-        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset));
+        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset), address(concreteAsyncVault));
 
         addStrategyWithDeallocationOrder(address(strategy), address(concreteAsyncVault), allocator, strategyOperator);
 
@@ -289,7 +372,7 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
 
     //This test case was fixed by adding a require check in the allocate function to ensure that the vault has enough balance to process the epoch.
     function testProcessEpochInsufficientBalance() public {
-        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset));
+        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset), address(concreteAsyncVault));
 
         addStrategyWithDeallocationOrder(address(strategy), address(concreteAsyncVault), allocator, strategyOperator);
 
@@ -459,7 +542,7 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
 
     function testClaimWithdrawalDisableQueue() public {
         uint256 currentEpoch = concreteAsyncVault.latestEpochID();
-        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset));
+        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset), address(concreteAsyncVault));
 
         addStrategyWithDeallocationOrder(address(strategy), address(concreteAsyncVault), allocator, strategyOperator);
         uint256 withdrawAmount = 1000000e18;
@@ -522,36 +605,47 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
         vm.prank(user1);
         concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
 
-        vm.expectEmit(true, true, true, true);
-        emit IConcreteAsyncVaultImpl.RequestMovedToNextEpoch(user1, withdrawAmount, currentEpoch, currentEpoch + 1);
+        // Close the epoch so we can move from closed → active
         vm.prank(withdrawalManager);
-        concreteAsyncVault.moveRequestToNextEpoch(user1);
+        concreteAsyncVault.closeEpoch();
+        uint256 activeEpoch = concreteAsyncVault.latestEpochID();
+
+        vm.expectEmit(true, true, true, true);
+        emit IConcreteAsyncVaultImpl.RequestMovedToNextEpoch(user1, withdrawAmount, currentEpoch, activeEpoch);
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.moveRequestToNextEpoch(user1, currentEpoch, type(uint256).max);
 
         assertEq(concreteAsyncVault.getUserEpochRequest(user1, currentEpoch), 0);
-        assertEq(concreteAsyncVault.getUserEpochRequest(user1, currentEpoch + 1), withdrawAmount);
+        assertEq(concreteAsyncVault.getUserEpochRequest(user1, activeEpoch), withdrawAmount);
         assertEq(concreteAsyncVault.totalRequestedSharesPerEpoch(currentEpoch), 0);
-        assertEq(concreteAsyncVault.totalRequestedSharesPerEpoch(currentEpoch + 1), withdrawAmount);
+        assertEq(concreteAsyncVault.totalRequestedSharesPerEpoch(activeEpoch), withdrawAmount);
     }
 
     function testMoveRequestToNextEpochUnauthorized() public {
+        uint256 currentEpoch = concreteAsyncVault.latestEpochID();
         vm.expectRevert(
             abi.encodeWithSelector(
                 IAccessControl.AccessControlUnauthorizedAccount.selector, user1, RolesLib.WITHDRAWAL_MANAGER
             )
         );
         vm.prank(user1);
-        concreteAsyncVault.moveRequestToNextEpoch(user1);
+        concreteAsyncVault.moveRequestToNextEpoch(user1, currentEpoch, type(uint256).max);
     }
 
     function testMoveRequestToNextEpochNoRequestingShares() public {
+        // Close epoch so there is a previous closed epoch
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+        uint256 closedEpoch = concreteAsyncVault.latestEpochID() - 1;
+
         vm.expectRevert(abi.encodeWithSelector(IConcreteAsyncVaultImpl.NoRequestingShares.selector));
         vm.prank(withdrawalManager);
-        concreteAsyncVault.moveRequestToNextEpoch(user1);
+        concreteAsyncVault.moveRequestToNextEpoch(user1, closedEpoch, type(uint256).max);
     }
 
     function testEpochProcessingWithYield() public {
         // 1. Add a strategy
-        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset));
+        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset), address(concreteAsyncVault));
 
         addStrategyWithDeallocationOrder(address(strategy), address(concreteAsyncVault), allocator, strategyOperator);
 
@@ -638,9 +732,481 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
     }
 
     function testMoveRequestToNextEpochZeroAddress() public {
+        uint256 currentEpoch = concreteAsyncVault.latestEpochID();
         vm.expectRevert(abi.encodeWithSelector(IConcreteAsyncVaultImpl.ZeroAddress.selector));
         vm.prank(withdrawalManager);
-        concreteAsyncVault.moveRequestToNextEpoch(address(0));
+        concreteAsyncVault.moveRequestToNextEpoch(address(0), currentEpoch, type(uint256).max);
+    }
+
+    function testMoveRequestToNextEpochWrongEpochID() public {
+        uint256 withdrawAmount = 100000e18;
+
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        uint256 activeEpoch = concreteAsyncVault.latestEpochID();
+
+        uint256 closedEpoch = activeEpoch - 1;
+        // Pass the active epoch instead of the closed epoch
+        vm.expectRevert(
+            abi.encodeWithSelector(IConcreteAsyncVaultImpl.EpochMismatch.selector, activeEpoch, closedEpoch)
+        );
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.moveRequestToNextEpoch(user1, activeEpoch, type(uint256).max);
+    }
+
+    function testMoveRequestToNextEpochAlreadyProcessed() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 closedEpoch = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+        concreteAsyncVault.processEpoch();
+
+        // Close next epoch so closedEpoch-1 pattern works
+        concreteAsyncVault.closeEpoch();
+        vm.stopPrank();
+
+        // The original closedEpoch is now processed — but to trigger the
+        // EpochAlreadyProcessed check we need epochID == latestEpochID - 1
+        // which after two closeEpoch() calls is epoch 2. Epoch 2 was just closed
+        // but not processed, so let's process it first.
+        // Actually: latestEpochID is now 3. closedEpochID = 2. epoch 2 is NOT processed.
+        // epoch 1 IS processed. We need the closed epoch to be processed.
+        // Let's process epoch 2, close epoch 3, so that latestEpochID=4, closedEpochID=3.
+        // But closedEpochID=3 is not processed. We need to set up so closedEpochID is processed.
+        // Simplest: process epoch 2, then try to move from epoch 2 (now processed).
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.processEpoch(); // processes epoch 2
+        concreteAsyncVault.closeEpoch(); // latestEpochID = 4, closedEpochID = 3
+
+        // epoch 3 is closed but not processed — but we want to test moving from
+        // a processed epoch. The require check is on closedEpochID.
+        // closedEpochID = latestEpochID - 1 = 3 which is NOT processed.
+        // So the only way to hit EpochAlreadyProcessed is if we process epoch 3 too.
+        concreteAsyncVault.processEpoch(); // processes epoch 3
+        concreteAsyncVault.closeEpoch(); // latestEpochID = 5, closedEpochID = 4
+
+        // process epoch 4
+        concreteAsyncVault.processEpoch(); // processes epoch 4
+        vm.stopPrank();
+
+        // Now latestEpochID = 5, closedEpochID = 4, and epoch 4 IS processed
+        uint256 processedEpoch = concreteAsyncVault.latestEpochID() - 1;
+        vm.expectRevert(abi.encodeWithSelector(IConcreteAsyncVaultImpl.EpochAlreadyProcessed.selector, processedEpoch));
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.moveRequestToNextEpoch(user1, processedEpoch, type(uint256).max);
+    }
+
+    function testMoveRequestToNextEpochInsufficientShares() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 closedEpoch = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        vm.expectRevert(abi.encodeWithSelector(IConcreteStandardVaultImpl.InsufficientShares.selector));
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.moveRequestToNextEpoch(user1, closedEpoch, withdrawAmount + 1);
+    }
+
+    function testMoveRequestToNextEpochZeroAmount() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 closedEpoch = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        vm.expectRevert(abi.encodeWithSelector(IConcreteAsyncVaultImpl.ZeroShares.selector));
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.moveRequestToNextEpoch(user1, closedEpoch, 0);
+    }
+
+    function testMoveRequestToNextEpochPartialAmount() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 partialAmount = 40000e18;
+        uint256 closedEpoch = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+        uint256 activeEpoch = concreteAsyncVault.latestEpochID();
+
+        vm.expectEmit(true, true, true, true);
+        emit IConcreteAsyncVaultImpl.RequestMovedToNextEpoch(user1, partialAmount, closedEpoch, activeEpoch);
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.moveRequestToNextEpoch(user1, closedEpoch, partialAmount);
+
+        assertEq(concreteAsyncVault.getUserEpochRequest(user1, closedEpoch), withdrawAmount - partialAmount);
+        assertEq(concreteAsyncVault.getUserEpochRequest(user1, activeEpoch), partialAmount);
+        assertEq(concreteAsyncVault.totalRequestedSharesPerEpoch(closedEpoch), withdrawAmount - partialAmount);
+        assertEq(concreteAsyncVault.totalRequestedSharesPerEpoch(activeEpoch), partialAmount);
+    }
+
+    // ============ Partial Epoch Processing Unit Tests ============
+
+    function testProcessPartialEpochRequest() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.redeem(withdrawAmount, user1, user1);
+
+        uint256 totalAssetsBefore = concreteAsyncVault.totalAssets();
+        uint256 totalSupplyBefore = concreteAsyncVault.totalSupply();
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        uint256 user1AssetsBefore = asset.balanceOf(user1);
+
+        vm.expectEmit(true, true, true, true);
+        emit IConcreteAsyncVaultImpl.PartialEpochRequestProcessed(user1, epoch1, withdrawAmount, withdrawAmount);
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, type(uint256).max);
+        vm.stopPrank();
+
+        assertEq(asset.balanceOf(user1), user1AssetsBefore + withdrawAmount, "user received assets");
+        assertEq(concreteAsyncVault.getUserEpochRequest(user1, epoch1), 0, "request zeroed");
+        assertEq(concreteAsyncVault.totalRequestedSharesPerEpoch(epoch1), 0, "epoch total zeroed");
+        assertEq(concreteAsyncVault.totalAssets(), totalAssetsBefore - withdrawAmount, "totalAssets reduced");
+        assertEq(concreteAsyncVault.totalSupply(), totalSupplyBefore - withdrawAmount, "totalSupply reduced");
+        assertEq(concreteAsyncVault.pastEpochsUnclaimedAssets(), 0, "no unclaimed assets reserved");
+        assertEq(concreteAsyncVault.getEpochPricePerShare(epoch1), 0, "epoch NOT marked processed");
+    }
+
+    function testProcessPartialEpochRequestEpochMismatch() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 currentEpoch = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.redeem(withdrawAmount, user1, user1);
+
+        // Passing the active epoch (1) when closedEpochID = latestEpoch - 1 = 0
+        uint256 expectedClosedEpoch = currentEpoch - 1;
+        vm.expectRevert(
+            abi.encodeWithSelector(IConcreteAsyncVaultImpl.EpochMismatch.selector, currentEpoch, expectedClosedEpoch)
+        );
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.processPartialEpochRequest(user1, currentEpoch, type(uint256).max);
+    }
+
+    function testProcessPartialEpochRequestEpochAlreadyProcessed() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.redeem(withdrawAmount, user1, user1);
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+        concreteAsyncVault.processEpoch();
+
+        vm.expectRevert(abi.encodeWithSelector(IConcreteAsyncVaultImpl.EpochAlreadyProcessed.selector, epoch1));
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, type(uint256).max);
+        vm.stopPrank();
+    }
+
+    function testProcessPartialEpochRequestZeroAddress() public {
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        vm.expectRevert(abi.encodeWithSelector(IConcreteAsyncVaultImpl.ZeroAddress.selector));
+        concreteAsyncVault.processPartialEpochRequest(address(0), epoch1, type(uint256).max);
+        vm.stopPrank();
+    }
+
+    function testProcessPartialEpochRequestNoRequestingShares() public {
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        vm.expectRevert(abi.encodeWithSelector(IConcreteAsyncVaultImpl.NoRequestingShares.selector));
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, type(uint256).max);
+        vm.stopPrank();
+    }
+
+    function testProcessPartialEpochRequestInsufficientBalance() public {
+        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset), address(concreteAsyncVault));
+        addStrategyWithDeallocationOrder(address(strategy), address(concreteAsyncVault), allocator, strategyOperator);
+
+        uint256 withdrawAmount = 100000e18;
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.redeem(withdrawAmount, user1, user1);
+
+        // Allocate all idle funds to strategy so vault has no liquidity
+        uint256 vaultBalance = asset.balanceOf(address(concreteAsyncVault));
+        bytes memory extraData = abi.encode(vaultBalance);
+        IAllocateModule.AllocateParams[] memory params = new IAllocateModule.AllocateParams[](1);
+        params[0] = IAllocateModule.AllocateParams({isDeposit: true, strategy: address(strategy), extraData: extraData});
+        vm.prank(allocator);
+        concreteAsyncVault.allocate(abi.encode(params));
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        vm.expectRevert(abi.encodeWithSelector(IConcreteStandardVaultImpl.InsufficientBalance.selector));
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, type(uint256).max);
+        vm.stopPrank();
+    }
+
+    function testProcessPartialEpochRequestZeroAmount() public {
+        uint256 withdrawAmount = 100_000e18;
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.redeem(withdrawAmount, user1, user1);
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        vm.expectRevert(abi.encodeWithSelector(IConcreteAsyncVaultImpl.ZeroShares.selector));
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, 0);
+        vm.stopPrank();
+    }
+
+    function testProcessPartialEpochRequestAmountExceedsRequest() public {
+        uint256 withdrawAmount = 100_000e18;
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.redeem(withdrawAmount, user1, user1);
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        vm.expectRevert(abi.encodeWithSelector(IConcreteStandardVaultImpl.InsufficientShares.selector));
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, withdrawAmount + 1);
+        vm.stopPrank();
+    }
+
+    function testProcessPartialEpochRequestAmountExceedsRequestByOne() public {
+        uint256 withdrawAmount = 100_000e18;
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.redeem(withdrawAmount, user1, user1);
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        // Process half first, then try to exceed the remainder
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, 50_000e18);
+
+        vm.expectRevert(abi.encodeWithSelector(IConcreteStandardVaultImpl.InsufficientShares.selector));
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, 50_000e18 + 1);
+        vm.stopPrank();
+    }
+
+    function testProcessPartialEpochRequestZeroAssets() public {
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        // Request 1 share while the vault is still 1:1
+        vm.prank(user1);
+        concreteAsyncVault.redeem(1, user1, user1);
+
+        // Allocate to a strategy and simulate a loss so sharePrice drops below 1e18
+        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset), address(concreteAsyncVault));
+        addStrategyWithDeallocationOrder(address(strategy), address(concreteAsyncVault), allocator, strategyOperator);
+
+        uint256 vaultBalance = asset.balanceOf(address(concreteAsyncVault));
+        bytes memory extraData = abi.encode(vaultBalance);
+        IAllocateModule.AllocateParams[] memory params = new IAllocateModule.AllocateParams[](1);
+        params[0] = IAllocateModule.AllocateParams({isDeposit: true, strategy: address(strategy), extraData: extraData});
+        vm.prank(allocator);
+        concreteAsyncVault.allocate(abi.encode(params));
+
+        strategy.simulateLoss(1e18);
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        // 1 share * sharePrice(< 1e18) / 1e18 → floor → 0 assets
+        vm.expectRevert(abi.encodeWithSelector(IConcreteStandardVaultImpl.InsufficientAssets.selector));
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, 1);
+        vm.stopPrank();
+    }
+
+    function testProcessPartialEpochRequestPartialAmount() public {
+        uint256 withdrawAmount = 100_000e18;
+        uint256 partialShares = 40_000e18;
+        uint256 remainingShares = withdrawAmount - partialShares;
+        uint256 yieldAmount = 300_000e18; // 10% yield on 3M total
+
+        // Setup strategy and simulate profit so exchange rate > 1:1
+        ERC4626StrategyMock strategy = new ERC4626StrategyMock(address(asset), address(concreteAsyncVault));
+        addStrategyWithDeallocationOrder(address(strategy), address(concreteAsyncVault), allocator, strategyOperator);
+
+        bytes memory extraData = abi.encode(1_000_000e18);
+        IAllocateModule.AllocateParams[] memory params = new IAllocateModule.AllocateParams[](1);
+        params[0] = IAllocateModule.AllocateParams({isDeposit: true, strategy: address(strategy), extraData: extraData});
+        vm.prank(allocator);
+        concreteAsyncVault.allocate(abi.encode(params));
+
+        asset.mint(address(this), yieldAmount);
+        asset.approve(address(strategy), yieldAmount);
+        strategy.simulateYield(yieldAmount);
+
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.redeem(withdrawAmount, user1, user1);
+
+        uint256 totalAssetsBefore = concreteAsyncVault.totalAssets();
+        uint256 totalSupplyBefore = concreteAsyncVault.totalSupply();
+        uint256 rateBefore = totalAssetsBefore * 1e18 / totalSupplyBefore;
+        assertTrue(rateBefore > 1e18, "rate should be > 1:1 after yield");
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        uint256 user1AssetsBefore = asset.balanceOf(user1);
+
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, partialShares);
+        vm.stopPrank();
+
+        uint256 receivedAssets = asset.balanceOf(user1) - user1AssetsBefore;
+        assertTrue(receivedAssets > partialShares, "assets > shares thanks to yield");
+        assertEq(concreteAsyncVault.getUserEpochRequest(user1, epoch1), remainingShares, "remaining request");
+        assertEq(
+            concreteAsyncVault.totalRequestedSharesPerEpoch(epoch1), remainingShares, "epoch total reduced by partial"
+        );
+        assertEq(concreteAsyncVault.totalAssets(), totalAssetsBefore - receivedAssets, "totalAssets reduced");
+        assertEq(concreteAsyncVault.totalSupply(), totalSupplyBefore - partialShares, "totalSupply reduced");
+        assertApproxEqAbs(
+            concreteAsyncVault.totalAssets() * 1e18 / concreteAsyncVault.totalSupply(),
+            rateBefore,
+            1,
+            "exchange rate preserved after partial at non-1:1 rate"
+        );
+        assertEq(concreteAsyncVault.pastEpochsUnclaimedAssets(), 0, "no unclaimed assets reserved");
+        assertEq(concreteAsyncVault.getEpochPricePerShare(epoch1), 0, "epoch NOT marked processed");
+    }
+
+    function testProcessPartialEpochRequestTwoPartials() public {
+        uint256 withdrawAmount = 100_000e18;
+        uint256 first = 30_000e18;
+        uint256 second = 50_000e18;
+        uint256 remaining = withdrawAmount - first - second;
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.redeem(withdrawAmount, user1, user1);
+
+        uint256 totalAssetsBefore = concreteAsyncVault.totalAssets();
+        uint256 totalSupplyBefore = concreteAsyncVault.totalSupply();
+        uint256 rateBefore = totalAssetsBefore * 1e18 / totalSupplyBefore;
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        uint256 user1AssetsBefore = asset.balanceOf(user1);
+
+        // First partial
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, first);
+        assertEq(asset.balanceOf(user1), user1AssetsBefore + first, "after first partial");
+        assertEq(concreteAsyncVault.getUserEpochRequest(user1, epoch1), withdrawAmount - first);
+
+        // Second partial
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, second);
+        vm.stopPrank();
+
+        assertEq(asset.balanceOf(user1), user1AssetsBefore + first + second, "after second partial");
+        assertEq(concreteAsyncVault.getUserEpochRequest(user1, epoch1), remaining, "remaining after two partials");
+        assertEq(concreteAsyncVault.totalRequestedSharesPerEpoch(epoch1), remaining, "epoch total after two partials");
+        assertEq(concreteAsyncVault.totalAssets(), totalAssetsBefore - first - second, "totalAssets");
+        assertEq(concreteAsyncVault.totalSupply(), totalSupplyBefore - first - second, "totalSupply");
+        assertEq(
+            concreteAsyncVault.totalAssets() * 1e18 / concreteAsyncVault.totalSupply(),
+            rateBefore,
+            "exchange rate preserved after two partials"
+        );
+    }
+
+    function testProcessPartialEpochRequestUintMaxCapsToBalance() public {
+        uint256 withdrawAmount = 100_000e18;
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.redeem(withdrawAmount, user1, user1);
+
+        uint256 totalAssetsBefore = concreteAsyncVault.totalAssets();
+        uint256 rateBefore = totalAssetsBefore * 1e18 / concreteAsyncVault.totalSupply();
+
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        uint256 user1AssetsBefore = asset.balanceOf(user1);
+
+        vm.expectEmit(true, true, true, true);
+        emit IConcreteAsyncVaultImpl.PartialEpochRequestProcessed(user1, epoch1, withdrawAmount, withdrawAmount);
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, type(uint256).max);
+        vm.stopPrank();
+
+        assertEq(asset.balanceOf(user1), user1AssetsBefore + withdrawAmount, "user received full amount");
+        assertEq(concreteAsyncVault.getUserEpochRequest(user1, epoch1), 0, "request fully consumed");
+        assertEq(concreteAsyncVault.totalRequestedSharesPerEpoch(epoch1), 0, "epoch total zeroed");
+        assertEq(
+            concreteAsyncVault.totalAssets() * 1e18 / concreteAsyncVault.totalSupply(),
+            rateBefore,
+            "exchange rate preserved"
+        );
+    }
+
+    function testProcessPartialEpochRequestUnauthorized() public {
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, user1, RolesLib.WITHDRAWAL_MANAGER
+            )
+        );
+        vm.prank(user1);
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, type(uint256).max);
+    }
+
+    function testPausePreventsProcessPartialEpochRequest() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 epoch1 = concreteAsyncVault.latestEpochID();
+
+        vm.prank(user1);
+        concreteAsyncVault.redeem(withdrawAmount, user1, user1);
+
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteAsyncVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteAsyncVault.pause();
+
+        vm.prank(withdrawalManager);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteAsyncVault.processPartialEpochRequest(user1, epoch1, type(uint256).max);
     }
 
     function testclaimUsersBatch() public {
@@ -811,5 +1377,126 @@ contract QueueUnitTest is ConcreteAsyncVaultImplBaseSetup, AddStrategyWithDeallo
 
         // Verify assets were transferred directly
         assertEq(asset.balanceOf(thirdParty), initialThirdPartyAssetBalance + withdrawAmount);
+    }
+
+    function testPausePreventsCancelRequest() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 currentEpoch = concreteAsyncVault.latestEpochID();
+
+        // Create withdrawal request
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        // Pause the vault
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteAsyncVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteAsyncVault.pause();
+
+        // Should not be able to cancel request when paused
+        vm.prank(user1);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteAsyncVault.cancelRequest(currentEpoch);
+    }
+
+    function testPausePreventsClaimWithdrawal() public {
+        uint256 withdrawAmount = 100000e18;
+        uint256 currentEpoch = concreteAsyncVault.latestEpochID();
+
+        // Create withdrawal request
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        // Process epoch
+        vm.startPrank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+        concreteAsyncVault.processEpoch();
+        vm.stopPrank();
+
+        // Pause the vault
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteAsyncVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteAsyncVault.pause();
+
+        // Should not be able to claim withdrawal when paused
+        uint256[] memory epochIDs = new uint256[](1);
+        epochIDs[0] = currentEpoch;
+
+        vm.prank(user1);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteAsyncVault.claimWithdrawal(epochIDs);
+    }
+
+    function testPausePreventsProcessEpoch() public {
+        uint256 withdrawAmount = 100000e18;
+
+        // Create withdrawal request
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        // Close epoch
+        vm.prank(withdrawalManager);
+        concreteAsyncVault.closeEpoch();
+
+        // Pause the vault
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteAsyncVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteAsyncVault.pause();
+
+        // Should not be able to process epoch when paused
+        vm.prank(withdrawalManager);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteAsyncVault.processEpoch();
+    }
+
+    function testPausePreventsCloseEpoch() public {
+        uint256 withdrawAmount = 100000e18;
+
+        // Create withdrawal request
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        // Pause the vault
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteAsyncVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteAsyncVault.pause();
+
+        // Should not be able to close epoch when paused
+        vm.prank(withdrawalManager);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteAsyncVault.closeEpoch();
+    }
+
+    function testPausePreventsMoveRequestToNextEpoch() public {
+        uint256 withdrawAmount = 100000e18;
+
+        // Create withdrawal request
+        vm.prank(user1);
+        concreteAsyncVault.withdraw(withdrawAmount, user1, user1);
+
+        // Pause the vault
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteAsyncVault.grantRole(RolesLib.PAUSER, pauser);
+
+        vm.prank(pauser);
+        concreteAsyncVault.pause();
+
+        // Should not be able to move request when paused
+        uint256 closedEpoch = concreteAsyncVault.latestEpochID() - 1;
+        vm.prank(withdrawalManager);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        concreteAsyncVault.moveRequestToNextEpoch(user1, closedEpoch, type(uint256).max);
     }
 }

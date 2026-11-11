@@ -2,11 +2,13 @@
 pragma solidity ^0.8.24;
 
 import {ConcreteFactoryBaseSetup} from "./ConcreteFactoryBaseSetup.t.sol";
-import {ConcreteBridgedAsyncVaultImpl} from "../../src/implementation/ConcreteBridgedVaultImpl.sol";
+import {ConcreteBridgedAsyncVaultImpl} from "../../src/implementation/ConcreteBridgedAsyncVaultImpl.sol";
 import {IConcreteBridgedAsyncVaultImpl} from "../../src/interface/IConcreteBridgedAsyncVaultImpl.sol";
 import {ERC20Mock} from "../mock/ERC20Mock.sol";
 import {AllocateModule} from "../../src/module/AllocateModule.sol";
 import {ConcreteV2RolesLib as RolesLib} from "../../src/lib/Roles.sol";
+import {IConcreteStandardVaultImpl} from "../../src/interface/IConcreteStandardVaultImpl.sol";
+import {IContractId} from "../../src/interface/IContractId.sol";
 
 contract TestBaseBridgedAsyncSetup is ConcreteFactoryBaseSetup {
     ConcreteBridgedAsyncVaultImpl public concreteBridgedAsyncVaultImpl;
@@ -20,7 +22,8 @@ contract TestBaseBridgedAsyncSetup is ConcreteFactoryBaseSetup {
         factory.approveImplementation(address(concreteBridgedAsyncVaultImpl));
         vm.stopPrank();
 
-        assertEq(factory.getImplementationByVersion(1), address(concreteBridgedAsyncVaultImpl));
+        uint64 contractId = uint64(IContractId(address(concreteBridgedAsyncVaultImpl)).ID());
+        assertEq(factory.getImplementationByVaultImpl(contractId), address(concreteBridgedAsyncVaultImpl));
 
         vm.label(address(factory), "factory");
         vm.label(address(factoryOwner), "factoryOwner");
@@ -53,9 +56,10 @@ contract ConcreteBridgedAsyncVaultImplBaseSetup is TestBaseBridgedAsyncSetup {
         asset = new ERC20Mock();
         allocateModule = new AllocateModule();
 
+        uint64 vaultImpl = uint64(IContractId(address(concreteBridgedAsyncVaultImpl)).ID());
         concreteBridgedAsyncVault = ConcreteBridgedAsyncVaultImpl(
             factory.create(
-                1,
+                vaultImpl,
                 vaultOwner,
                 abi.encode(
                     address(allocateModule), address(asset), vaultManager, "Concrete Bridged Async Vault", "CBAVault"
@@ -78,7 +82,10 @@ contract ConcreteBridgedAsyncVaultImplBaseSetup is TestBaseBridgedAsyncSetup {
         concreteBridgedAsyncVault.grantRole(RolesLib.ALLOCATOR, allocator);
         concreteBridgedAsyncVault.grantRole(RolesLib.HOOK_MANAGER, hookManager);
         concreteBridgedAsyncVault.grantRole(RolesLib.WITHDRAWAL_MANAGER, withdrawalManager);
+        // Set deposit limits to 0 for unbackedMint to work
+        concreteBridgedAsyncVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.DepositLimits, abi.encode(0, 0)
+        );
         vm.stopPrank();
     }
 }
-

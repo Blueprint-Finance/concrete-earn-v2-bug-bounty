@@ -2,9 +2,11 @@
 pragma solidity ^0.8.24;
 
 import {IUpgradeableVault} from "./IUpgradeableVault.sol";
+import {IHurdleRateOracle} from "./IHurdleRateOracle.sol";
 import {Hooks} from "./IHook.sol";
 import {IERC4626} from "@openzeppelin-contracts/interfaces/IERC4626.sol";
 import {IAccessControlEnumerable} from "@openzeppelin-contracts/access/extensions/IAccessControlEnumerable.sol";
+import {ITimelockProtected} from "./ITimelockProtected.sol";
 
 /**
  * @title IConcreteStandardVaultImpl
@@ -13,16 +15,28 @@ import {IAccessControlEnumerable} from "@openzeppelin-contracts/access/extension
  * @dev Strategies are external contracts that implement the IStrategyTemplate interface and handle
  * fund allocation to different yield-generating protocols or investment opportunities.
  */
-interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessControlEnumerable {
+interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessControlEnumerable, ITimelockProtected {
     /**
      * @dev Thrown when attempting to withdraw to the zero address.
      */
     error InvalidReceiver();
 
     /**
+     * @dev Thrown when attempting to sweep the vault share token itself. On async vaults the
+     *      share token is the vault (`address(this)`) and holds shares escrowed for queued
+     *      withdrawal requests; sweeping it would drain that escrow and break cancellation/settlement.
+     */
+    error CannotSweepShareToken();
+
+    /**
      * @dev Thrown when attempting to add a strategy that uses a different asset than the vault.
      */
     error InvalidStrategyAsset();
+
+    /**
+     * @dev Thrown when attempting to add a strategy that is bound to a different vault.
+     */
+    error InvalidStrategyVault();
 
     /**
      * @dev Thrown when attempting to add a strategy that has already been added to the vault.
@@ -105,19 +119,50 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
     error InvalidWithdrawLimits();
 
     /**
-     * @dev Thrown when the asset amount is out of bounds.
+     * @dev Thrown when a hook's vault() does not match this vault.
      */
-    error AssetAmountOutOfBounds(address sender, uint256 assets, uint256 minDepositAmount, uint256 maxDepositAmount);
+    error InvalidHookVault(address hook);
+
+    /**
+     *
+     *
+     *
+     * @dev Thrown when the minimum deposit amount per transaction is not met.
+     */
+    error MinimumDepositAmountNotMet(address sender, uint256 assets, uint256 minTxDepositAmount);
+
+    /**
+     * @dev Thrown when the minimum withdraw amount per transaction is not met.
+     */
+    error MinimumWithdrawAmountNotMet(address sender, uint256 assets, uint256 minTxWithdrawAmount);
 
     /**
      * @dev Thrown when attempting to remove a strategy that has allocation or is in the deallocation order.
      */
     error StrategyHasAllocation();
+    error StaleDeallocationOrder(address strategy);
+
+    /**
+     * @dev Thrown when a Halted-only reconciliation action is attempted on a strategy that is not Halted.
+     */
+    error StrategyNotHalted();
+
+    /**
+     * @dev Thrown when a reconciliation action requires a strategy with a non-zero allocation.
+     */
+    error StrategyHasNoAllocation();
 
     /**
      * @dev Thrown when the vault has insufficient balance to process the epoch.
      */
     error InsufficientBalance();
+
+    /**
+     * @dev Thrown when there are insufficient withdrawable assets available across all strategies.
+     * @param requested The amount of assets requested for withdrawal.
+     * @param available The total amount of assets available for withdrawal (idle + withdrawable from strategies).
+     */
+    error InsufficientWithdrawableAssets(uint256 requested, uint256 available);
 
     /**
      * @dev Thrown when calculated shares are zero.
@@ -128,6 +173,13 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
      * @dev Thrown when calculated assets are zero.
      */
     error InsufficientAssets();
+
+    /// @notice Thrown when renounceOwnership is called — permanently disabled.
+    error RenounceOwnershipDisabled();
+
+    /// @notice Thrown when removing a ROLE_ADMIN would leave the vault with no admins.
+    /// @dev The last remaining ROLE_ADMIN cannot revoke or renounce its own admin role.
+    error CannotRemoveLastRoleAdmin();
 
     /**
      * @dev Emitted when a new strategy is successfully added to the vault.
@@ -140,6 +192,24 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
      * @param strategy The address of the strategy contract that was removed.
      */
     event StrategyRemoved(address strategy);
+
+    /**
+     * @dev Emitted when a Halted strategy's frozen allocation is realized as a loss and the
+     *      strategy is removed. `cachedTotalAssets` is decreased by `loss`.
+     * @param strategy The Halted strategy whose allocation was written down.
+     * @param loss The amount written off from `cachedTotalAssets` (equals the prior allocation).
+     */
+    event StrategyLossRealized(address indexed strategy, uint256 loss);
+
+    /**
+     * @dev Emitted when a Halted strategy's allocation is migrated to an Active strategy and the
+     *      Halted strategy is removed. `cachedTotalAssets` and the aggregate allocation are unchanged;
+     *      any real shortfall is reconciled by the next yield accrual on the destination strategy.
+     * @param fromStrategy The Halted strategy whose allocation was migrated away.
+     * @param toStrategy The Active strategy that received the migrated allocation.
+     * @param amount The allocation amount moved from `fromStrategy` to `toStrategy`.
+     */
+    event StrategyAllocationMigrated(address indexed fromStrategy, address indexed toStrategy, uint256 amount);
 
     /**
      * @dev Emitted when a strategy is set to Halted status.
@@ -202,23 +272,35 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
     event PerformanceFeeRecipientUpdated(address performanceFeeRecipient);
 
     /**
-     * @dev Emitted when deposit limits are updated.
-     * @param maxDepositAmount The new maximum deposit amount.
-     * @param minDepositAmount The new minimum deposit amount.
+     * @dev Emitted when the hurdle rate oracle is updated.
+     * @param oracle The new hurdle rate oracle address (address(0) disables hurdle gating).
      */
-    event DepositLimitsUpdated(uint256 maxDepositAmount, uint256 minDepositAmount);
+    event HurdleRateOracleUpdated(address indexed oracle);
+
+    /**
+     * @dev Emitted when deposit limits are updated.
+     * @param maxGlobalDepositAmount The new maximum global deposit amount (applies to total assets across all users).
+     * @param minTxDepositAmount The new minimum deposit amount per transaction.
+     */
+    event DepositLimitsUpdated(uint256 maxGlobalDepositAmount, uint256 minTxDepositAmount);
 
     /**
      * @dev Emitted when withdraw limits are updated.
-     * @param maxWithdrawAmount The new maximum withdraw amount.
-     * @param minWithdrawAmount The new minimum withdraw amount.
+     * @param maxTxWithdrawAmount The new maximum withdraw amount per transaction.
+     * @param minTxWithdrawAmount The new minimum withdraw amount per transaction.
      */
-    event WithdrawLimitsUpdated(uint256 maxWithdrawAmount, uint256 minWithdrawAmount);
+    event WithdrawLimitsUpdated(uint256 maxTxWithdrawAmount, uint256 minTxWithdrawAmount);
 
     /**
      * @dev Emitted when the deallocation order is updated.
      */
     event DeallocationOrderUpdated();
+
+    /**
+     * @dev Emitted when the hooks are set.
+     * @param hooks The new hooks.
+     */
+    event HooksSet(Hooks hooks);
 
     /**
      * @dev Emitted when an individual strategy's yield is accrued.
@@ -233,11 +315,29 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
     );
 
     /**
+     * @dev Enumeration of vault-manager–configurable parameters.
+     * Used by {configure} to dispatch to the correct setter in a single call.
+     */
+    enum VaultManagerConfig {
+        ManagementFee,
+        PerformanceFee,
+        HurdleRateOracle,
+        DepositLimits,
+        WithdrawLimits,
+        CancellationEnabled
+    }
+
+    error InvalidVaultManagerConfig();
+
+    /**
      * @dev Enumeration of possible strategy statuses within the vault.
      * @dev Inactive: Strategy is inactive and cannot receive new allocations.
      * @dev Active: Strategy is active and can receive allocations and process withdrawals normally.
      * @dev Halted: Strategy is halted, typically due to detected issues or failures.
-     * In this state, the strategy can be removed even if it has allocated funds
+     * In this state the strategy is skipped by yield accrual and withdrawals. A Halted strategy that
+     * still has allocated funds cannot be removed directly; its position must first be reconciled via
+     * {reconcileHaltedStrategy}: pass a `toStrategy` to migrate the position onto an Active strategy,
+     * or pass `address(0)` to write the position off as a loss.
      */
     enum StrategyStatus {
         Inactive,
@@ -278,14 +378,16 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
 
     /**
      * @dev Removes a strategy from the vault.
-     * @dev The strategy can only be removed if it has no allocated funds, unless it's in Halted status.
+     * @dev The strategy can only be removed if it has zero allocated funds and is not in the
+     *      deallocation order. A Halted strategy that still holds an allocation must first be
+     *      reconciled via {reconcileHaltedStrategy}.
      * @dev Only callable by accounts with the STRATEGY_MANAGER role.
      *
      * @param strategy The address of the strategy contract to remove.
      *
      * Requirements:
      * - Strategy must exist in the vault
-     * - Strategy must have zero allocated funds OR be in Halted status
+     * - Strategy must have zero allocated funds and not be in the deallocation order
      * - Caller must have STRATEGY_MANAGER role
      *
      * Emits:
@@ -293,9 +395,44 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
      *
      * Reverts:
      * - StrategyDoesNotExist if strategy is not in the vault
-     * - Custom revert if strategy has allocated funds and is not in Halted status
+     * - StrategyHasAllocation if strategy has allocated funds or is in the deallocation order
      */
     function removeStrategy(address strategy) external;
+
+    /**
+     * @dev Reconciles the frozen allocation of a Halted strategy and removes it. The behaviour
+     *      depends on `toStrategy`:
+     *      - `address(0)` (realize loss): `cachedTotalAssets` is decreased by the strategy's
+     *        `allocated` and the per-strategy `allocated` is cleared. Use when the position is
+     *        unrecoverable and there is no successor strategy.
+     *      - non-zero (migrate): the allocation is moved onto an Active `toStrategy`.
+     *        `cachedTotalAssets` and the aggregate allocation are preserved, so the next yield
+     *        accrual on the destination reconciles any real shortfall as a loss (or none, if the
+     *        position was fully recovered). The physical assets must be moved from the old strategy
+     *        to the new one out of band.
+     *      In both cases the derived floating amount stays exact (no phantom funds).
+     * @dev Only callable by accounts with the STRATEGY_MANAGER role.
+     *
+     * @param fromStrategy The Halted strategy whose allocation will be reconciled and removed.
+     * @param toStrategy   The Active strategy that receives the migrated allocation, or
+     *                     `address(0)` to write the position off as a loss.
+     *
+     * Requirements:
+     * - fromStrategy must exist in the vault, be Halted and have a non-zero allocation
+     * - When migrating, toStrategy must exist in the vault and be Active
+     * - Caller must have STRATEGY_MANAGER role
+     *
+     * Emits:
+     * - StrategyLossRealized (loss branch) or StrategyAllocationMigrated (migrate branch),
+     *   plus StrategyRemoved
+     *
+     * Reverts:
+     * - StrategyDoesNotExist if fromStrategy (or, when migrating, toStrategy) is not in the vault
+     * - StrategyNotHalted if fromStrategy is not Halted
+     * - StrategyHasNoAllocation if fromStrategy has zero allocation
+     * - StrategyIsHalted if a non-zero toStrategy is not Active
+     */
+    function reconcileHaltedStrategy(address fromStrategy, address toStrategy) external;
 
     /**
      * @dev Toggles a strategy's status between Active and Halted.
@@ -338,42 +475,50 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
      * @notice Accrues yield and accounts for losses across all active strategies in the vault.
      * @dev This function updates the vault's internal accounting by querying the current
      *      value of all strategy allocations and calculating net yield or losses.
-     * @dev This function can be called by anyone to update the vault's accounting.
+     * @dev Only callable by accounts with the ALLOCATOR role, and only while the vault is not paused.
+     *      Yield is also accrued automatically before user and admin operations (`withYieldAccrual`).
      * @dev The yield accrual operation does not trigger actual fund movements, it only
      *         updates the vault's internal state to reflect current strategy values.
      */
     function accrueYield() external;
 
     /**
-     * @notice Updates the management fee for the vault.
-     * @param managementFee The new management fee in basis points.
+     * @notice Generic vault-manager setter that dispatches based on `configType`.
      * @dev Only callable by accounts with VAULT_MANAGER role.
-     * @dev Fee must be <= MAX_MANAGEMENT_FEE.
-     * @dev If fee > 0, recipient must be set.
+     *      Applies nonReentrant + withYieldAccrual guards once for all config types.
+     * @param configType The parameter to configure (see {VaultManagerConfig}).
+     * @param data ABI-encoded value(s) for the chosen config type:
+     *   - ManagementFee:    abi.encode(uint16 fee)
+     *   - PerformanceFee:   abi.encode(uint16 fee)
+     *   - HurdleRateOracle: abi.encode(IHurdleRateOracle oracle)
+     *   - DepositLimits:    abi.encode(uint256 minTxDeposit, uint256 maxGlobalDeposit)
+     *   - WithdrawLimits:   abi.encode(uint256 minTxWithdraw, uint256 maxTxWithdraw)
+     *   - CancellationEnabled: abi.encode(bool enabled) (async vaults only)
      */
-    function updateManagementFee(uint16 managementFee) external;
+    function configure(VaultManagerConfig configType, bytes calldata data) external;
+
+    /**
+     * @notice Get whether users can cancel pending withdrawal requests.
+     * @dev Standard (synchronous) vaults have no cancellation flow and always return false.
+     *      Async vaults override this: defaults to true and can be toggled via {configure}
+     *      with {VaultManagerConfig.CancellationEnabled}. Exposed on the base interface so
+     *      hooks can query cancellation support through a single unconditional call.
+     * @return True if cancellation is enabled, false if cancelRequest is blocked or unsupported.
+     */
+    function cancellationEnabled() external view returns (bool);
 
     /**
      * @notice Updates the management fee recipient for the vault.
      * @param recipient The new management fee recipient address.
-     * @dev Only callable by accounts with VAULT_MANAGER role.
+     * @dev Only callable by factory owner.
      * @dev Recipient cannot be address(0).
      */
     function updateManagementFeeRecipient(address recipient) external;
 
     /**
-     * @notice Updates the performance fee for the vault.
-     * @param performanceFee The new performance fee in basis points.
-     * @dev Only callable by accounts with VAULT_MANAGER role.
-     * @dev Fee must be <= MAX_PERFORMANCE_FEE.
-     * @dev If fee > 0, recipient must be set.
-     */
-    function updatePerformanceFee(uint16 performanceFee) external;
-
-    /**
      * @notice Updates the performance fee recipient for the vault.
      * @param recipient The new performance fee recipient address.
-     * @dev Only callable by accounts with VAULT_MANAGER.
+     * @dev Only callable by factory owner.
      * @dev Recipient cannot be address(0).
      */
     function updatePerformanceFeeRecipient(address recipient) external;
@@ -404,6 +549,12 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
      * @param hooks The hooks to set.
      */
     function setHooks(Hooks memory hooks) external;
+
+    /**
+     * @notice Returns the current hooks configuration for the vault.
+     * @return The Hooks struct containing the target address and flags.
+     */
+    function getHooks() external view returns (Hooks memory);
 
     /**
      * @notice Previews the total assets that would be available after accruing yield from all strategies.
@@ -456,52 +607,18 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
     function allocateModule() external view returns (address);
 
     /**
-     * @dev Returns the management fee configuration.
-     * @return managementFeeRecipient The address that receives management fees.
-     * @return managementFeeRate The management fee rate in basis points (where 10,000 = 100%).
-     * @return lastAccrualTime The timestamp of the last management fee accrual.
-     */
-    function managementFee()
-        external
-        view
-        returns (address managementFeeRecipient, uint16 managementFeeRate, uint32 lastAccrualTime);
-
-    /**
-     * @dev Sets the deposit limits.
-     * @param maxDepositAmount The maximum deposit amount.
-     * @param minDepositAmount The minimum deposit amount.
-     * @dev Only callable by accounts with VAULT_MANAGER role.
-     */
-    function setDepositLimits(uint256 maxDepositAmount, uint256 minDepositAmount) external;
-
-    /**
-     * @dev Sets the withdraw limits.
-     * @param maxWithdrawAmount The maximum withdraw amount.
-     * @param minWithdrawAmount The minimum withdraw amount.
-     * @dev Only callable by accounts with VAULT_MANAGER role.
-     */
-    function setWithdrawLimits(uint256 maxWithdrawAmount, uint256 minWithdrawAmount) external;
-
-    /**
      * @dev Returns the deposit limits.
-     * @return maxDepositAmount The maximum deposit amount.
-     * @return minDepositAmount The minimum deposit amount.
+     * @return maxGlobalDepositAmount The maximum deposit amount for the vault.
+     * @return minTxDepositAmount The minimum deposit amount for a single transaction.
      */
-    function getDepositLimits() external view returns (uint256 maxDepositAmount, uint256 minDepositAmount);
+    function getDepositLimits() external view returns (uint256 maxGlobalDepositAmount, uint256 minTxDepositAmount);
 
     /**
      * @dev Returns the withdraw limits.
-     * @return maxWithdrawAmount The maximum withdraw amount.
-     * @return minWithdrawAmount The minimum withdraw amount.
+     * @return maxTxWithdrawAmount The maximum withdraw amount for a single transaction.
+     * @return minTxWithdrawAmount The minimum withdraw amount for a single transaction.
      */
-    function getWithdrawLimits() external view returns (uint256 maxWithdrawAmount, uint256 minWithdrawAmount);
-
-    /**
-     * @dev Returns the performance fee configuration.
-     * @return performanceFeeRecipient The address that receives performance fees.
-     * @return performanceFeeRate The performance fee rate in basis points (where 10,000 = 100%).
-     */
-    function performanceFee() external view returns (address performanceFeeRecipient, uint16 performanceFeeRate);
+    function getWithdrawLimits() external view returns (uint256 maxTxWithdrawAmount, uint256 minTxWithdrawAmount);
 
     /**
      * @dev Returns the total amount of assets allocated to all strategies.
@@ -518,6 +635,24 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
     function cachedTotalAssets() external view returns (uint256);
 
     /**
+     * @notice Transfers donated tokens to recipient.
+     * @dev For the underlying asset, only the surplus above floating is swept.
+     *      For any other token, the entire balance is swept.
+     * @dev Only callable by accounts with the VAULT_MANAGER role.
+     * @param token The token to be swept.
+     * @param recipient The address to receive the swept tokens.
+     */
+    function sweepDonatedTokens(address token, address recipient) external;
+
+    /**
+     * @dev Emitted when donated tokens are swept out of the vault.
+     * @param token The token that was swept.
+     * @param recipient The address that received the swept tokens.
+     * @param amount The amount of tokens swept.
+     */
+    event DonationSwept(address indexed token, address indexed recipient, uint256 amount);
+
+    /**
      * @dev Returns the deallocation order from strategies.
      *
      * @return order An array of strategy addresses in the order they should be deallocated.
@@ -530,4 +665,10 @@ interface IConcreteStandardVaultImpl is IUpgradeableVault, IERC4626, IAccessCont
      * @param order An array of strategy addresses in the order they should be deallocated.
      */
     function setDeallocationOrder(address[] calldata order) external;
+
+    /**
+     * @notice Returns the current hurdle rate oracle address.
+     * @return The hurdle rate oracle, or address(0) if not set.
+     */
+    function getHurdleRateOracle() external view returns (IHurdleRateOracle);
 }

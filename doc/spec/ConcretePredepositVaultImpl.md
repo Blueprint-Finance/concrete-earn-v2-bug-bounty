@@ -60,7 +60,7 @@ A **Predeposit Vault** on L1 enables users to deposit into a future L2 (or other
 - Assets allocated to L1 strategies
 
 ### 2. Deposit Lock
-- Vault manager: `setDepositLimits(0, 0)`
+- Vault manager: `configure(VaultManagerConfig.DepositLimits, abi.encode(0, 0))` (min tx, max global). `configure` is timelocked (TIER_2, 24 h) once the vault's timelock is active, so schedule it ahead of the migration.
 - Total supply frozen
 - No new deposits accepted
 
@@ -247,9 +247,9 @@ updateManagementFee(0);
 - [ ] Test on testnet
 
 **Migration:**
-- [ ] Lock L1 deposits: `setDepositLimits(0, 0)`
-- [ ] Lock L2 deposits: `setDepositLimits(0, 0)`
-- [ ] Lock L2 withdrawal: `setWithdrawalLimits(0, 0)`
+- [ ] Lock L1 deposits: `configure(DepositLimits, abi.encode(0, 0))` (timelocked)
+- [ ] Lock L2 deposits: `configure(DepositLimits, abi.encode(0, 0))` (timelocked)
+- [ ] Lock L2 withdrawal: `configure(WithdrawLimits, abi.encode(0, 0))` (timelocked)
 - [ ] Bridge assets (in tranches)
   - [ ] `unbackedMint()` on L2
   - [ ] Fund strategies, `accrueYield()`

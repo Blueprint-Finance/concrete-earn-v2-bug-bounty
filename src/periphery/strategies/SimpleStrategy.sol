@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {BaseStrategy} from "./BaseStrategy.sol";
+import {ContractIdEncoding} from "../../lib/ContractIdEncoding.sol";
 import {BaseStrategyStorageLib as BaseStrategyStorage} from "../lib/BaseStrategyStorageLib.sol";
 import {SimpleStrategyStorageLib as SimpleStrategyStorage} from "../lib/SimpleStrategyStorageLib.sol";
 import {StrategyType} from "../../interface/IStrategyTemplate.sol";
@@ -14,11 +15,34 @@ import {StrategyType} from "../../interface/IStrategyTemplate.sol";
  * @dev Uses EIP-7201 storage layout for upgradeability and caches deposit balance in storage.
  */
 contract SimpleStrategy is BaseStrategy {
+    function FLAVOUR() public pure virtual returns (uint256) {
+        return 1; // simple strategy
+    }
+
+    /**
+     * @notice Returns the contract ID
+     * @return The contract ID
+     */
+    function ID() public pure virtual override(BaseStrategy) returns (uint64) {
+        return ContractIdEncoding.encode(CONTRACT_TYPE, FLAVOUR(), 1, 6, 0);
+    }
+
     /**
      * @dev Constructor that disables initializers
      */
     constructor() {
         _disableInitializers();
+    }
+
+    /**
+     * @dev External initializer function
+     * @param admin    The address that will have admin role
+     * @param vault_   The address of the authorized vault
+     * @param timelock_ Address of the Timelock contract. Pass `address(0)` to
+     *                  deploy without timelock enforcement.
+     */
+    function initialize(address admin, address vault_, address timelock_) external virtual initializer {
+        __BaseStrategy_init(admin, vault_, timelock_);
     }
 
     /**

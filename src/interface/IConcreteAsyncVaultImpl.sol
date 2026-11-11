@@ -69,6 +69,21 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
     error EmptyUsers();
 
     /**
+     * @dev Thrown when attempting to claim with unwind cost that exceeds the unwind cost cap.
+     */
+    error UnwindCostTooHigh();
+
+    /**
+     * @dev Thrown when attempting to set an invalid unwind cost cap.
+     */
+    error InvalidUnwindCostCap();
+
+    /**
+     * @dev Thrown when attempting to cancel a request while cancellation is disabled on the vault.
+     */
+    error CancellationDisabled();
+
+    /**
      * @dev Emitted when the withdrawal queue is initialized.
      * @param epochID The initial epoch ID.
      */
@@ -91,10 +106,11 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
     error EpochAlreadyClosed(uint256 epochID);
 
     /**
-     * @dev Thrown when attempting to process an epoch that is still open.
-     * @param epochID The epoch that was still open.
+     * @dev Thrown when the provided epoch ID does not match the expected epoch.
+     * @param providedEpochID The epoch ID that was provided.
+     * @param expectedEpochID The epoch ID that was expected.
      */
-    error EpochStillOpen(uint256 epochID);
+    error EpochMismatch(uint256 providedEpochID, uint256 expectedEpochID);
 
     /**
      * @dev Emitted when a user submits a withdrawal request that is queued for epoch processing.
@@ -147,6 +163,33 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
     event RequestMovedToNextEpoch(address indexed user, uint256 shares, uint256 currentEpochID, uint256 nextEpochID);
 
     /**
+     * @dev Emitted when a user's priority withdrawal is claimed.
+     * @param user The address of the user claiming the withdrawal.
+     * @param shares The amount of shares claimed/fulfilled.
+     * @param grossAssets The amount of gross assets before deducting unwind cost based on current exchange rate
+     * @param unwindCost The amount paid by user as a priority wwl fee (operational cost).
+     * @param netAssets The amount of assets claimed by user after deducting unwind cost.
+     * @param epochID The epoch from which the withdrawal was claimed.
+     */
+    event PriorityWithdrawalClaimed(
+        address indexed user,
+        uint256 shares,
+        uint256 grossAssets,
+        uint256 unwindCost,
+        uint256 netAssets,
+        uint256 epochID
+    );
+
+    /**
+     * @dev Emitted when an individual withdrawal request is fulfilled from a closed, unprocessed epoch.
+     * @param user The address of the user whose request was fulfilled.
+     * @param epochID The closed epoch from which the request was fulfilled.
+     * @param shares Number of shares burned for this fulfilment.
+     * @param assets Amount of underlying tokens transferred to the user.
+     */
+    event PartialEpochRequestProcessed(address indexed user, uint256 epochID, uint256 shares, uint256 assets);
+
+    /**
      * @dev Emitted when an epoch is closed.
      * @param epochID The epoch that was closed.
      */
@@ -159,6 +202,12 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
     event QueueActiveToggled(bool isQueueActive);
 
     /**
+     * @dev Emitted when the cancellation setting is updated via {configure}.
+     * @param enabled True when users can cancel pending requests, false when cancellation is blocked.
+     */
+    event CancellationEnabledSet(bool enabled);
+
+    /**
      * @dev This struct definition is maintained for interface compatibility.
      */
     struct RedeemRequest {
@@ -167,8 +216,10 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
     }
 
     /**
-     * @notice Cancel pending redeem request for a specific epoch (only unprocessed epochs)
-     * @dev Users can only cancel requests from epochs that haven't been processed yet (no price locked)
+     * @notice Cancel a user's pending redeem request in the current (open) epoch
+     * @dev Only callable by the WITHDRAWAL_MANAGER role. Reverts with `EnforcedPause` while the vault is paused.
+     * @dev Only requests in the open epoch can be cancelled; once the epoch is closed the call reverts
+     *      with `EpochAlreadyClosed`. Reverts with `CancellationDisabled` when cancellation is disabled.
      * @dev Returns shares back to the user and updates epoch accounting
      * @param user The user address to cancel the request for
      * @param epochID The epoch ID from which to cancel the request
@@ -176,8 +227,11 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
     function cancelRequest(address user, uint256 epochID) external;
 
     /**
-     * @notice Cancel pending redeem request for a specific epoch (only unprocessed epochs)
-     * @dev Users can only cancel requests from epochs that haven't been processed yet (no price locked)
+     * @notice Cancel the caller's pending redeem request in the current (open) epoch
+     * @dev Only requests in the open epoch can be cancelled; once the epoch is closed the call reverts
+     *      with `EpochAlreadyClosed`. Reverts with `CancellationDisabled` when cancellation is disabled
+     *      (see `cancellationEnabled`).
+     * @dev Reverts with `EnforcedPause` while the vault is paused (checked before all of the above).
      * @dev Returns shares back to the user and updates epoch accounting
      * @param epochID The epoch ID from which to cancel the request
      */
@@ -203,6 +257,22 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
     function claimWithdrawal(address user, uint256[] calldata epochIDs) external;
 
     /**
+     * @notice Claim a priority withdrawal.
+     * @dev Only callable by PRIORITY_WITHDRAWAL_EXECUTOR role.
+     *      Burns the user's queued shares, transfers `grossAssets - unwindCost` to the
+     *      user, deducts the net amount from `cachedTotalAssets`, and calls `IAsyncAccounting.adjustTotalAssets`
+     *      on the strategy to record the unwind cost.  The next yield accrual will
+     *      reconcile the vault's tracked allocation with the strategy.
+     * @param user The user address to claim from.
+     * @param sharesToFulfil The number of shares to burn.
+     * @param unwindCost The cost charged for early unwinding.
+     * @param strategy The strategy whose `totalAllocatedValue` will be reduced by the
+     *                 unwind cost. Must not be `address(0)`.
+     */
+    function claimPriorityWithdrawal(address user, uint256 sharesToFulfil, uint256 unwindCost, address strategy)
+        external;
+
+    /**
      * @notice Close the current epoch
      * @dev Only callable by WITHDRAWAL_MANAGER role
      * @dev Closes the current epoch and increments the epoch ID
@@ -215,15 +285,40 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
      * @dev Harvests all strategies to get current accurate pricing before processing
      * @dev Calculates share price and reserves required assets for the epoch
      * @dev Can process any epoch with pending requests, enabling historical processing
-     * @dev Only callable by ALLOCATOR role
+     * @dev Only callable by WITHDRAWAL_MANAGER role
      */
     function processEpoch() external;
 
     /**
-     * @notice Move a user's request to the next epoch
-     * @param user The user address to move the request for
+     * @notice Fulfil all or part of a user's withdrawal request from a closed,
+     *         unprocessed epoch.
+     * @dev Burns the specified shares at the current exchange rate and transfers the
+     *      corresponding assets immediately (no separate claim step).  The epoch is
+     *      NOT marked as processed; `processEpoch()` must still be called to
+     *      finalise the epoch.
+     * @dev Only callable by WITHDRAWAL_MANAGER role.
+     * @param user The user whose closed-epoch request to fulfil.
+     * @param epochID The closed epoch to target. Must be closed and not yet processed
+     *                (intent-validation parameter).
+     * @param amount Number of shares to process. Pass `type(uint256).max` to process
+     *               the user's entire request.
      */
-    function moveRequestToNextEpoch(address user) external;
+    function processPartialEpochRequest(address user, uint256 epochID, uint256 amount) external;
+
+    /**
+     * @notice Move a user's withdrawal request from the closed, unprocessed epoch
+     *         (`latestEpochID - 1`) to the current active epoch (`latestEpochID`).
+     * @dev Reverts with `EpochMismatch` if `fromEpochID` does not match
+     *      `latestEpochID - 1`, or with `EpochAlreadyProcessed` if the
+     *      previous epoch is already processed.
+     * @dev Only callable by WITHDRAWAL_MANAGER role.
+     * @param user The user address whose request to move.
+     * @param fromEpochID The closed epoch to move from. Must equal `latestEpochID - 1`
+     *                    (intent-validation parameter).
+     * @param amount Number of shares to move. Pass `type(uint256).max` to move the
+     *               user's entire request.
+     */
+    function moveRequestToNextEpoch(address user, uint256 fromEpochID, uint256 amount) external;
 
     /**
      * @notice Get claimable redeem request from a specific epoch
@@ -304,7 +399,22 @@ interface IConcreteAsyncVaultImpl is IConcreteStandardVaultImpl {
 
     /**
      * @notice Toggle the active status of the queue
-     * @dev Only callable by the ALLOCATOR role
+     * @dev Only callable by the VAULT_MANAGER role
      */
     function toggleQueueActive() external;
+
+    /**
+     * @notice Get the unwind cost cap for priority withdrawals
+     * @dev Returns the unwind cost cap in basis points (10000 = 100%)
+     * @return The unwind cost cap in basis points
+     */
+    function getUnwindCostCap() external view returns (uint16);
+
+    /**
+     * @notice Set the unwind cost cap for priority withdrawals
+     * @dev Only callable by the VAULT_MANAGER role
+     * @dev Unwind cost cap is in basis points (10000 = 100%)
+     * @param unwindCostCap_ The new unwind cost cap in basis points
+     */
+    function setUnwindCostCap(uint16 unwindCostCap_) external;
 }

@@ -76,4 +76,3 @@ interface IPredepostVaultOApp {
         view
         returns (MessagingFee memory fee);
 }
-

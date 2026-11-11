@@ -46,7 +46,7 @@ contract SimpleStrategyUnitTest is Test {
         SimpleStrategy impl = new SimpleStrategy();
 
         // Create proxy and initialize
-        bytes memory initData = abi.encodeWithSelector(BaseStrategy.initialize.selector, admin, vault);
+        bytes memory initData = abi.encodeWithSelector(SimpleStrategy.initialize.selector, admin, vault, address(0));
 
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initData);
         return SimpleStrategy(address(proxy));
@@ -63,8 +63,59 @@ contract SimpleStrategyUnitTest is Test {
     function testConstructor() public view {
         assertEq(strategy.asset(), address(asset));
         assertTrue(strategy.hasRole(PeripheryRolesLib.STRATEGY_ADMIN, admin));
+        assertTrue(strategy.hasRole(PeripheryRolesLib.ROLE_ADMIN, admin));
+        assertTrue(strategy.hasRole(PeripheryRolesLib.PAUSER, admin));
         // vault is set in initialize
         assertEq(strategy.getVault(), vault);
+    }
+
+    function setUpPauser() internal {
+        // Grant PAUSER role to admin for pause/unpause tests (using ROLE_ADMIN)
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.PAUSER, admin);
+    }
+
+    function testRoleAdminCanGrantRoles() public {
+        address newOperator = makeAddr("newOperator");
+        address newAdmin = makeAddr("newAdmin");
+
+        // Admin has ROLE_ADMIN, so can grant OPERATOR_ROLE
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator);
+        assertTrue(strategy.hasRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator));
+
+        // Admin can grant STRATEGY_ADMIN
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.STRATEGY_ADMIN, newAdmin);
+        assertTrue(strategy.hasRole(PeripheryRolesLib.STRATEGY_ADMIN, newAdmin));
+
+        // Admin can grant PAUSER
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.PAUSER, newAdmin);
+        assertTrue(strategy.hasRole(PeripheryRolesLib.PAUSER, newAdmin));
+    }
+
+    function testRoleAdminCanRevokeRoles() public {
+        address newOperator = makeAddr("newOperator");
+
+        // Grant role first
+        vm.prank(admin);
+        strategy.grantRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator);
+        assertTrue(strategy.hasRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator));
+
+        // Revoke role using ROLE_ADMIN
+        vm.prank(admin);
+        strategy.revokeRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator);
+        assertFalse(strategy.hasRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator));
+    }
+
+    function testNonRoleAdminCannotGrantRoles() public {
+        address newOperator = makeAddr("newOperator");
+
+        // User doesn't have ROLE_ADMIN, so cannot grant roles
+        vm.prank(user);
+        vm.expectRevert();
+        strategy.grantRole(PeripheryRolesLib.OPERATOR_ROLE, newOperator);
     }
 
     function testAllocateFunds() public {
@@ -247,6 +298,7 @@ contract SimpleStrategyUnitTest is Test {
     }
 
     function testPause() public {
+        setUpPauser();
         // Initially not paused
         assertFalse(strategy.paused());
 
@@ -259,6 +311,7 @@ contract SimpleStrategyUnitTest is Test {
     }
 
     function testUnpause() public {
+        setUpPauser();
         // Pause first
         vm.prank(admin);
         strategy.pause();
@@ -280,6 +333,7 @@ contract SimpleStrategyUnitTest is Test {
     }
 
     function testUnpauseUnauthorized() public {
+        setUpPauser();
         // Pause first
         vm.prank(admin);
         strategy.pause();
@@ -291,6 +345,7 @@ contract SimpleStrategyUnitTest is Test {
     }
 
     function testPausePreventsOperations() public {
+        setUpPauser();
         setupStrategyWithVaultAndTokens();
 
         // Pause the strategy
@@ -311,5 +366,35 @@ contract SimpleStrategyUnitTest is Test {
         vm.prank(vault);
         vm.expectRevert();
         strategy.onWithdraw(500e18);
+    }
+
+    // ── Timelock interface ────────────────────────────────────────────────────
+
+    function testTimelockSetAndGet() public {
+        address timelockAddr = makeAddr("timelock");
+
+        (address tl, bool active) = strategy.getTimelock();
+        assertEq(tl, address(0));
+        assertFalse(active);
+
+        vm.prank(admin);
+        strategy.setTimelock(timelockAddr);
+
+        (tl, active) = strategy.getTimelock();
+        assertEq(tl, timelockAddr);
+        assertFalse(active);
+    }
+
+    function testTimelockActivate() public {
+        address timelockAddr = makeAddr("timelock");
+
+        vm.startPrank(admin);
+        strategy.setTimelock(timelockAddr);
+        strategy.activateTimelock();
+        vm.stopPrank();
+
+        (address tl, bool active) = strategy.getTimelock();
+        assertEq(tl, timelockAddr);
+        assertTrue(active);
     }
 }

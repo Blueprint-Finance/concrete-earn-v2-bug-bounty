@@ -17,16 +17,33 @@ pragma solidity ^0.8.24;
 // External dependencies
 // ─────────────────────────────────────────────────────────────────────────────
 import {Initializable} from "@openzeppelin-upgradeable/proxy/utils/Initializable.sol";
-import {OwnableUpgradeable} from "@openzeppelin-upgradeable/access/OwnableUpgradeable.sol";
-import {ReentrancyGuardUpgradeable} from "@openzeppelin-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {Ownable2StepUpgradeable} from "@openzeppelin-upgradeable/access/Ownable2StepUpgradeable.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin-contracts/utils/ReentrancyGuardTransient.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Protocol-facing interfaces
 // ─────────────────────────────────────────────────────────────────────────────
+import {IDefaultEnforcedVaultConfiguration} from "../interface/IDefaultEnforcedVaultConfiguration.sol";
 import {IUpgradeableVault} from "../interface/IUpgradeableVault.sol";
 
-abstract contract UpgradeableVault is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, IUpgradeableVault {
+// ─────────────────────────────────────────────────────────────────────────────
+// Storage layout libraries
+// ─────────────────────────────────────────────────────────────────────────────
+abstract contract UpgradeableVault is
+    Initializable,
+    Ownable2StepUpgradeable,
+    ReentrancyGuardTransient,
+    IUpgradeableVault
+{
     address public immutable factory;
+
+    /**
+     * @notice Get the contract's ID.
+     * @return ID of the contract
+     * @dev This is a virtual function that must be overridden by concrete implementations.
+     *      Concrete implementations should also implement IContractId interface.
+     */
+    function ID() public pure virtual returns (uint64);
 
     constructor(address factoryAddr) {
         _disableInitializers();
@@ -45,49 +62,58 @@ abstract contract UpgradeableVault is Initializable, OwnableUpgradeable, Reentra
     /**
      * @inheritdoc IUpgradeableVault
      */
-    function version() external view returns (uint64) {
+    function version() public view returns (uint64) {
         return _getInitializedVersion();
     }
 
     /**
      * @inheritdoc IUpgradeableVault
      */
-    function initialize(uint64 initialVersion, address owner_, bytes calldata data)
-        external
-        notInitialized
-        reinitializer(initialVersion)
-    {
+    function initialize(
+        uint64 initialVaultImpl,
+        address owner_,
+        IDefaultEnforcedVaultConfiguration.DefaultEnforcedVaultConfiguration calldata defaultEnforcedVaultConfig,
+        bytes calldata data
+    ) external notInitialized initializer {
         require(_msgSender() == factory, NotFactory());
-
-        __ReentrancyGuard_init();
+        require(initialVaultImpl == ID(), InvalidVaultImpl());
 
         __Ownable_init(owner_);
 
-        _initialize(initialVersion, owner_, data);
+        _initialize(initialVaultImpl, owner_, defaultEnforcedVaultConfig, data);
     }
 
     /**
      * @inheritdoc IUpgradeableVault
      */
-    function upgrade(uint64 newVersion, bytes calldata data) external nonReentrant reinitializer(newVersion) {
+    function upgrade(uint64 newVaultImpl, bytes calldata data)
+        external
+        nonReentrant
+        reinitializer(_getInitializedVersion() + 1)
+    {
         require(_msgSender() == factory, NotFactory());
-
-        _upgrade(_getInitializedVersion(), newVersion, data);
+        require(newVaultImpl == ID(), InvalidVaultImpl());
+        _upgrade(newVaultImpl, data);
     }
 
     /**
      *
-     * @param initialVersion initial implementation version from the factory
+     * @param initialVaultImpl initial vault ID from the factory
      * @param owner vault proxy owner address
+     * @param defaultEnforcedVaultConfig default configuration from the factory
      * @param data arbitrary data used to initialize a proxy implementation
      */
-    function _initialize(uint64 initialVersion, address owner, bytes memory data) internal virtual {}
+    function _initialize(
+        uint64 initialVaultImpl,
+        address owner,
+        IDefaultEnforcedVaultConfiguration.DefaultEnforcedVaultConfiguration calldata defaultEnforcedVaultConfig,
+        bytes memory data
+    ) internal virtual {}
 
     /**
      *
-     * @param oldVersion vault proxy old implementation version
-     * @param newVersion vault proxy new implementation version
+     * @param newVaultImpl vault proxy new vault ID
      * @param data arbitrary data that will be used on the new `newImplementation.upgrade()` function to execute the upgrade flow
      */
-    function _upgrade(uint64 oldVersion, uint64 newVersion, bytes calldata data) internal virtual {}
+    function _upgrade(uint64 newVaultImpl, bytes calldata data) internal virtual {}
 }

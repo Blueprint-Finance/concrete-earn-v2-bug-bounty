@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.24;
+// SPDX-License-Identifier: AGPL-3.0
+pragma solidity ^0.8.27;
 
 library BaseStrategyStorageLib {
     /// @dev keccak256(abi.encode(uint256(keccak256("concrete.storage.BaseStrategyStorage")) - 1)) & ~bytes32(uint256(0xff))

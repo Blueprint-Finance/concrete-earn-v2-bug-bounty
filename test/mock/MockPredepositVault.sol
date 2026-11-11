@@ -110,4 +110,3 @@ contract MockPredepositVault is ERC20 {
         emit SharesClaimedOnTargetChain(msg.sender, userShares);
     }
 }
-

@@ -8,6 +8,10 @@ library ConcreteCachedVaultStateStorageLib {
         /// @dev Store last total assets of the vault at specific timestamp
         uint256 cachedTotalAssets;
     }
+    // NOTE: The floating amount is no longer stored. It is derived on demand as
+    //       `cachedTotalAssets - SUM(strategy.allocated) + lockedAssets`
+    //       (see StandardVaultHelperLib.floatingAmount), which is immune to donations
+    //       and removes the upgrade/migration bookkeeping the stored variable required.
 
     /// @dev keccak256(abi.encode(uint256(keccak256("concrete.storage.ConcreteCachedVaultStateStorage")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant ConcreteCachedVaultStateStorageLocation =

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.24;
+// SPDX-License-Identifier: AGPL-3.0
+pragma solidity ^0.8.27;
 
 /**
  * @title MultisigStrategyStorageLib
@@ -15,6 +15,7 @@ library MultisigStrategyStorageLib {
     struct MultisigStrategyStorage {
         address multiSig; // The address of the multi-signature wallet
         uint256 vaultDepositedAmount; // The amount of assets deposited into this strategy
+        address pendingMultiSig; // The proposed multi-sig pending acceptance (2-step transfer)
     }
 
     /// @notice Fetches the MultisigStrategyStorage from the specified location

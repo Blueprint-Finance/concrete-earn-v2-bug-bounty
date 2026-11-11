@@ -5,6 +5,8 @@ import {ConcreteBridgedAsyncVaultImplBaseSetup} from "../../common/ConcreteBridg
 import {IConcreteBridgedAsyncVaultImpl} from "../../../src/interface/IConcreteBridgedAsyncVaultImpl.sol";
 import {IAccessControl} from "@openzeppelin-contracts/access/IAccessControl.sol";
 import {ConcreteV2RolesLib as RolesLib} from "../../../src/lib/Roles.sol";
+import {PausableUpgradeable} from "@openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
+import {IConcreteStandardVaultImpl} from "../../../src/interface/IConcreteStandardVaultImpl.sol";
 
 contract UnbackedMintUnitTest is ConcreteBridgedAsyncVaultImplBaseSetup {
     address public user1;
@@ -128,6 +130,22 @@ contract UnbackedMintUnitTest is ConcreteBridgedAsyncVaultImplBaseSetup {
         concreteBridgedAsyncVault.unbackedMint(sharesToMint);
     }
 
+    /// @notice Test unbacked mint reverts when deposit limits are not zero
+    function test_UnbackedMint_RevertsWhenDepositLimitsNotZero_x() public {
+        uint256 sharesToMint = 1000000e18;
+
+        // Set deposit limits to non-zero (this should succeed)
+        vm.prank(vaultManager);
+        concreteBridgedAsyncVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.DepositLimits, abi.encode(0, type(uint256).max)
+        );
+
+        // Now unbackedMint should revert because maxDepositLimit is not zero
+        vm.expectRevert(abi.encodeWithSelector(IConcreteBridgedAsyncVaultImpl.DepositLimitsNotZero.selector));
+        vm.prank(vaultManager);
+        concreteBridgedAsyncVault.unbackedMint(sharesToMint);
+    }
+
     /// @notice Test unbacked mint fails after deposit
     function test_UnbackedMint_RevertsAfterDeposit() public {
         uint256 depositAmount = 100000e18;
@@ -135,12 +153,16 @@ contract UnbackedMintUnitTest is ConcreteBridgedAsyncVaultImplBaseSetup {
 
         // Setup user with assets and approval
         asset.mint(user1, depositAmount);
-        vm.startPrank(user1);
+        vm.prank(user1);
         asset.approve(address(concreteBridgedAsyncVault), depositAmount);
-
+        // set deposit limits to max to avoid reverts
+        vm.prank(vaultManager);
+        concreteBridgedAsyncVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.DepositLimits, abi.encode(0, type(uint256).max)
+        );
+        vm.prank(user1);
         // User deposits first
         uint256 sharesMinted = concreteBridgedAsyncVault.deposit(depositAmount, user1);
-        vm.stopPrank();
 
         // Verify deposit worked
         assertEq(concreteBridgedAsyncVault.balanceOf(user1), sharesMinted, "User should have received shares");
@@ -171,14 +193,19 @@ contract UnbackedMintUnitTest is ConcreteBridgedAsyncVaultImplBaseSetup {
 
         // Setup user with assets and approval
         asset.mint(user1, depositAmount);
-        vm.startPrank(user1);
+        vm.prank(user1);
         asset.approve(address(concreteBridgedAsyncVault), depositAmount);
-
+        // set deposit limits to max to avoid reverts
+        vm.prank(vaultManager);
+        concreteBridgedAsyncVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.DepositLimits, abi.encode(0, type(uint256).max)
+        );
+        vm.prank(user1);
         // User deposits after unbacked mint
         uint256 totalSupplyBefore = concreteBridgedAsyncVault.totalSupply();
 
+        vm.prank(user1);
         uint256 sharesReceived = concreteBridgedAsyncVault.deposit(depositAmount, user1);
-        vm.stopPrank();
 
         // Verify deposit worked
         assertGt(sharesReceived, 0, "User should have received shares");
@@ -206,4 +233,3 @@ contract UnbackedMintUnitTest is ConcreteBridgedAsyncVaultImplBaseSetup {
         assertEq(concreteBridgedAsyncVault.totalAssets(), depositAmount, "Total assets should equal deposit amount");
     }
 }
-

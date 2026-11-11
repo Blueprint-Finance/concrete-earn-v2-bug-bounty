@@ -3,16 +3,19 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "@openzeppelin-contracts/interfaces/IERC20.sol";
 import {IStrategyTemplate, StrategyType} from "../../src/interface/IStrategyTemplate.sol";
+import {IAsyncAccounting} from "../../src/interface/IAsyncAccounting.sol";
 import {ConcreteERC4626Mock} from "./ConcreteERC4626Mock.sol";
 import {SafeERC20} from "@openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
 
-contract ERC4626StrategyMock is IStrategyTemplate {
+contract ERC4626StrategyMock is IStrategyTemplate, IAsyncAccounting {
     using SafeERC20 for IERC20;
 
     ConcreteERC4626Mock public underlyingVault;
+    address public parentVault;
 
-    constructor(address underlyingVaultAsset) {
+    constructor(address underlyingVaultAsset, address parentVault_) {
         underlyingVault = new ConcreteERC4626Mock(underlyingVaultAsset);
+        parentVault = parentVault_;
     }
 
     function allocateFunds(bytes calldata data) external returns (uint256) {
@@ -44,8 +47,8 @@ contract ERC4626StrategyMock is IStrategyTemplate {
         return address(underlyingVault.asset());
     }
 
-    function getVault() external pure returns (address) {
-        return address(0); // Mock implementation
+    function getVault() external view returns (address) {
+        return parentVault; // Mock implementation
     }
 
     function strategyType() external pure returns (StrategyType) {
@@ -86,5 +89,40 @@ contract ERC4626StrategyMock is IStrategyTemplate {
 
     function simulateLoss(uint256 lossAmount) external {
         underlyingVault.simulateLossInVault(address(1), lossAmount);
+    }
+
+    // ─── IAsyncAccounting (mock stubs) ─────────────────────────────────
+
+    /// @dev No-op — mock derives value from real token balances.
+    function adjustTotalAssets(int256) external {}
+
+    /// @dev No-op — mock has no validation logic.
+    function adjustTotalAssets(int256, uint256) external {}
+
+    /// @dev No-op — mock is never paused.
+    function unpauseAndAdjustTotalAssets(int256) external {}
+
+    function setMaxAccountingChangeThreshold(uint64) external {}
+    function setAccountingValidityPeriod(uint64) external {}
+    function setCooldownPeriod(uint64) external {}
+
+    function getNextAccountingNonce() external pure returns (uint256) {
+        return 1;
+    }
+
+    function getLastUpdatedTimestamp() external pure returns (uint64) {
+        return 0;
+    }
+
+    function getMaxAccountingChangeThreshold() external pure returns (uint64) {
+        return 10000;
+    }
+
+    function getAccountingValidityPeriod() external pure returns (uint64) {
+        return 86400;
+    }
+
+    function getCooldownPeriod() external pure returns (uint64) {
+        return 3600;
     }
 }

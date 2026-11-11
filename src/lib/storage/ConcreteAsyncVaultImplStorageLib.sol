@@ -20,6 +20,11 @@ library ConcreteAsyncVaultImplStorageLib {
         mapping(uint256 => uint256) epochPricePerSharePlusOne;
         // Whether the queue is active
         bool isQueueActive;
+        // Unwind cost cap for priority withdrawals in basis points (10000 = 100%)
+        uint16 unwindCostCapBP;
+        // When true, cancelRequest is blocked. Defaults to false (cancellation enabled) so that
+        // existing vaults preserve their behaviour after upgrade with no migration required.
+        bool cancellationDisabled;
     }
 
     /**

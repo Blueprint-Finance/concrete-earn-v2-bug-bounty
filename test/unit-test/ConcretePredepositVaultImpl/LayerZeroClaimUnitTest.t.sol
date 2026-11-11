@@ -46,7 +46,7 @@ contract LayerZeroClaimUnitTest is ConcretePredepositVaultImplBaseSetup {
         asset.approve(address(predepositVault), 10000e18);
 
         // Deploy and setup strategy
-        strategy = new ERC4626StrategyMock(address(asset));
+        strategy = new ERC4626StrategyMock(address(asset), address(predepositVault));
         vm.prank(strategyOperator);
         predepositVault.addStrategy(address(strategy));
 
@@ -68,8 +68,8 @@ contract LayerZeroClaimUnitTest is ConcretePredepositVaultImplBaseSetup {
 
         // Lock deposits and withdrawals before allowing claims
         vm.startPrank(vaultManager);
-        predepositVault.setDepositLimits(0, 0);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.DepositLimits, abi.encode(0, 0));
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
         vm.stopPrank();
     }
 
@@ -296,7 +296,9 @@ contract LayerZeroClaimUnitTest is ConcretePredepositVaultImplBaseSetup {
     function test_claimOnTargetChain_revertsWhenDepositsNotLocked() public {
         // Restore deposit limits (unlock deposits)
         vm.prank(vaultManager);
-        predepositVault.setDepositLimits(0, type(uint256).max);
+        predepositVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.DepositLimits, abi.encode(0, type(uint256).max)
+        );
 
         bytes memory options = OptionsBuilder.newOptions().addExecutorLzReceiveOption(200000, 0);
         IPredepostVaultOApp oapp = IPredepostVaultOApp(predepositVault.getOApp());
@@ -542,7 +544,9 @@ contract LayerZeroClaimUnitTest is ConcretePredepositVaultImplBaseSetup {
     function test_batchClaimOnTargetChain_revertsWhenDepositsNotLocked() public {
         // Restore deposit limits (unlock deposits)
         vm.prank(vaultManager);
-        predepositVault.setDepositLimits(0, type(uint256).max);
+        predepositVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.DepositLimits, abi.encode(0, type(uint256).max)
+        );
 
         address[] memory users = new address[](1);
         users[0] = user1;
@@ -673,7 +677,9 @@ contract LayerZeroClaimUnitTest is ConcretePredepositVaultImplBaseSetup {
 
         // Unlock deposits temporarily for fuzz test setup
         vm.prank(vaultManager);
-        predepositVault.setDepositLimits(0, type(uint256).max);
+        predepositVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.DepositLimits, abi.encode(0, type(uint256).max)
+        );
 
         // Setup: create users and deposits
         (address[] memory fuzzUsers, uint256 initialTotalSupply) = _setupFuzzUsers(seed, numUsers);
@@ -695,7 +701,9 @@ contract LayerZeroClaimUnitTest is ConcretePredepositVaultImplBaseSetup {
     function _clearExistingUsers() internal {
         // Unlock withdrawals first (they're locked in base setup)
         vm.prank(vaultManager);
-        predepositVault.setWithdrawLimits(0, type(uint256).max);
+        predepositVault.configure(
+            IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, type(uint256).max)
+        );
 
         // Deallocate assets from strategy if needed
         uint256 strategyBalance = strategy.totalAllocatedValue();
@@ -756,8 +764,8 @@ contract LayerZeroClaimUnitTest is ConcretePredepositVaultImplBaseSetup {
         predepositVault.allocate(abi.encode(params));
 
         vm.startPrank(vaultManager);
-        predepositVault.setDepositLimits(0, 0);
-        predepositVault.setWithdrawLimits(0, 0);
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.DepositLimits, abi.encode(0, 0));
+        predepositVault.configure(IConcreteStandardVaultImpl.VaultManagerConfig.WithdrawLimits, abi.encode(0, 0));
         vm.stopPrank();
     }
 

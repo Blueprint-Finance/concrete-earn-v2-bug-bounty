@@ -2,10 +2,12 @@
 pragma solidity ^0.8.24;
 
 import {Hooks} from "../../../src/interface/IHook.sol";
+import {BaseHook} from "../../../src/periphery/hooks/BaseHook.sol";
 import {UserDepositCapHook} from "../../../src/periphery/hooks/UserDepositCapHook.sol";
 import {ConcreteStandardVaultImplBaseSetup} from "../../common/ConcreteStandardVaultImplBaseSetup.t.sol";
-import {HooksLibV1} from "../../../src/lib/Hooks.sol";
+import {HooksLibV2} from "../../../src/lib/Hooks.sol";
 import {Ownable} from "@openzeppelin-contracts/access/Ownable.sol";
+import {ClonesWithImmutableArgs} from "clones-with-immutable-args/ClonesWithImmutableArgs.sol";
 
 contract UserDepositCapHookTest is ConcreteStandardVaultImplBaseSetup {
     UserDepositCapHook public hook;
@@ -26,12 +28,12 @@ contract UserDepositCapHookTest is ConcreteStandardVaultImplBaseSetup {
         charlie = makeAddr("charlie");
         hookOwner = makeAddr("hookOwner");
 
-        // Deploy the hook
-        hook = new UserDepositCapHook(hookOwner);
+        // Deploy the hook as an ERC-1167 clone of a locked implementation.
+        hook = _deployHook(hookOwner, address(concreteStandardVault));
 
         // Configure the vault's deposit cap
         vm.prank(hookOwner);
-        hook.setVaultDepositCap(address(concreteStandardVault), VAULT_CAP);
+        hook.setDepositCap(VAULT_CAP);
 
         // Mint assets to test users
         asset.mint(alice, 10000 ether);
@@ -39,7 +41,7 @@ contract UserDepositCapHookTest is ConcreteStandardVaultImplBaseSetup {
         asset.mint(charlie, 10000 ether);
 
         // Setup hooks on vault
-        uint96 flags = uint96(1 << HooksLibV1.PRE_DEPOSIT) | uint96(1 << HooksLibV1.PRE_MINT);
+        uint96 flags = uint96(1 << HooksLibV2.PRE_DEPOSIT) | uint96(1 << HooksLibV2.PRE_MINT);
         Hooks memory hooks = Hooks({target: address(hook), flags: flags});
 
         vm.prank(hookManager);
@@ -50,59 +52,82 @@ contract UserDepositCapHookTest is ConcreteStandardVaultImplBaseSetup {
         return uint96(1 << flag);
     }
 
-    // ═════════════════════════════════════════════════════════════════════════════
-    // Constructor Tests
-    // ═════════════════════════════════════════════════════════════════════════════
-
-    function test_constructor_noDefaultCap() public {
-        UserDepositCapHook newHook = new UserDepositCapHook(hookOwner);
-        assertEq(newHook.getUserDepositCap(address(concreteStandardVault)), 0);
+    /// @dev Deploys a locked implementation, clones it (ClonesWithImmutableArgs) and initializes the clone.
+    function _deployHook(address owner_, address vault_) internal returns (UserDepositCapHook h) {
+        UserDepositCapHook impl = new UserDepositCapHook();
+        // Immutable args mirror the factory layout: [factory (20)][vault (20)]. This test
+        // contract acts as the factory authorized to initialize the clone.
+        h = UserDepositCapHook(ClonesWithImmutableArgs.clone(address(impl), abi.encodePacked(address(this), vault_)));
+        h.initialize(owner_);
     }
 
-    function test_constructor_revertsInvalidOwner() public {
+    // ═════════════════════════════════════════════════════════════════════════════
+    // Initializer Tests
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    function test_init_noDefaultCap() public {
+        UserDepositCapHook newHook = _deployHook(hookOwner, address(concreteStandardVault));
+        assertEq(newHook.getUserDepositCap(), 0);
+        assertEq(newHook.VAULT(), address(concreteStandardVault));
+    }
+
+    function test_init_revertsInvalidOwner() public {
+        UserDepositCapHook impl = new UserDepositCapHook();
+        UserDepositCapHook newHook = UserDepositCapHook(
+            ClonesWithImmutableArgs.clone(
+                address(impl), abi.encodePacked(address(this), address(concreteStandardVault))
+            )
+        );
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
-        new UserDepositCapHook(address(0));
+        newHook.initialize(address(0));
+    }
+
+    function test_init_revertsWhenCallerNotFactory() public {
+        UserDepositCapHook impl = new UserDepositCapHook();
+        // Embed a factory other than this test contract; a non-factory caller must not be able
+        // to initialize the clone (clone-init front-running protection).
+        UserDepositCapHook newHook = UserDepositCapHook(
+            ClonesWithImmutableArgs.clone(
+                address(impl), abi.encodePacked(makeAddr("otherFactory"), address(concreteStandardVault))
+            )
+        );
+        vm.expectRevert(BaseHook.NotFactory.selector);
+        newHook.initialize(hookOwner);
     }
 
     // ═════════════════════════════════════════════════════════════════════════════
     // Set Vault Deposit Cap Tests
     // ═════════════════════════════════════════════════════════════════════════════
 
-    function test_setVaultDepositCap() public {
-        address newVault = makeAddr("newVault");
+    function test_setDepositCap() public {
         uint256 newCap = 5000 ether;
 
         vm.expectEmit(true, true, true, true);
-        emit UserDepositCapHook.VaultDepositCapSet(newVault, 0, newCap);
+        emit UserDepositCapHook.DepositCapSet(VAULT_CAP, newCap);
 
         vm.prank(hookOwner);
-        hook.setVaultDepositCap(newVault, newCap);
+        hook.setDepositCap(newCap);
 
-        assertEq(hook.getUserDepositCap(newVault), newCap);
+        assertEq(hook.getUserDepositCap(), newCap);
     }
 
-    function test_setVaultDepositCap_updateExisting() public {
+    function test_setDepositCap_updateExisting() public {
         uint256 newCap = 2000 ether;
 
         vm.expectEmit(true, true, true, true);
-        emit UserDepositCapHook.VaultDepositCapSet(address(concreteStandardVault), VAULT_CAP, newCap);
+        emit UserDepositCapHook.DepositCapSet(VAULT_CAP, newCap);
 
         vm.prank(hookOwner);
-        hook.setVaultDepositCap(address(concreteStandardVault), newCap);
+        hook.setDepositCap(newCap);
 
-        assertEq(hook.getUserDepositCap(address(concreteStandardVault)), newCap);
+        assertEq(hook.getUserDepositCap(), newCap);
     }
 
-    function test_setVaultDepositCap_reverts() public {
+    function test_setDepositCap_reverts() public {
         //test non-owner reverts
         vm.prank(alice);
         vm.expectRevert();
-        hook.setVaultDepositCap(address(concreteStandardVault), 2000 ether);
-
-        //test zero address reverts
-        vm.prank(hookOwner);
-        vm.expectRevert(abi.encodeWithSelector(UserDepositCapHook.ZeroAddress.selector));
-        hook.setVaultDepositCap(address(0), 1000 ether);
+        hook.setDepositCap(2000 ether);
     }
 
     // ═════════════════════════════════════════════════════════════════════════════
@@ -201,7 +226,7 @@ contract UserDepositCapHookTest is ConcreteStandardVaultImplBaseSetup {
 
     function test_canUserDeposit() public {
         // Alice has no deposits yet
-        bool canDeposit = hook.canUserDeposit(address(concreteStandardVault), alice, 500 ether);
+        bool canDeposit = hook.canUserDeposit(alice, 500 ether);
 
         assertTrue(canDeposit);
 
@@ -212,13 +237,13 @@ contract UserDepositCapHookTest is ConcreteStandardVaultImplBaseSetup {
         vm.stopPrank();
 
         // Check if alice can deposit another 500
-        canDeposit = hook.canUserDeposit(address(concreteStandardVault), alice, 500 ether);
+        canDeposit = hook.canUserDeposit(alice, 500 ether);
 
         assertTrue(canDeposit);
 
         // expect revert
         vm.expectRevert();
-        hook.canUserDeposit(address(concreteStandardVault), alice, 501 ether);
+        hook.canUserDeposit(alice, 501 ether);
     }
 
     // ═════════════════════════════════════════════════════════════════════════════
@@ -298,5 +323,70 @@ contract UserDepositCapHookTest is ConcreteStandardVaultImplBaseSetup {
 
         assertEq(concreteStandardVault.balanceOf(alice), VAULT_CAP);
         vm.stopPrank();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    // Infinite Deposit Cap Tests
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    function test_setDepositCap_infinite() public {
+        vm.prank(hookOwner);
+        hook.setDepositCap(type(uint256).max);
+        assertEq(hook.getUserDepositCap(), type(uint256).max);
+    }
+
+    function test_deposit_infiniteCap_allowsAnyAmount() public {
+        vm.prank(hookOwner);
+        hook.setDepositCap(type(uint256).max);
+
+        uint256 largeAmount = 5000 ether;
+        asset.mint(alice, largeAmount);
+
+        vm.startPrank(alice);
+        asset.approve(address(concreteStandardVault), largeAmount);
+        concreteStandardVault.deposit(largeAmount, alice);
+        vm.stopPrank();
+
+        assertEq(concreteStandardVault.balanceOf(alice), largeAmount);
+    }
+
+    function test_deposit_infiniteCap_multipleDeposits() public {
+        vm.prank(hookOwner);
+        hook.setDepositCap(type(uint256).max);
+
+        uint256 amount = 3000 ether;
+        asset.mint(alice, amount * 3);
+
+        vm.startPrank(alice);
+        asset.approve(address(concreteStandardVault), amount * 3);
+        concreteStandardVault.deposit(amount, alice);
+        concreteStandardVault.deposit(amount, alice);
+        concreteStandardVault.deposit(amount, alice);
+        vm.stopPrank();
+
+        assertEq(concreteStandardVault.balanceOf(alice), amount * 3);
+    }
+
+    function test_mint_infiniteCap_allowsAnyAmount() public {
+        vm.prank(hookOwner);
+        hook.setDepositCap(type(uint256).max);
+
+        uint256 largeAmount = 5000 ether;
+        asset.mint(alice, largeAmount);
+
+        vm.startPrank(alice);
+        asset.approve(address(concreteStandardVault), largeAmount);
+        concreteStandardVault.mint(largeAmount, alice);
+        vm.stopPrank();
+
+        assertEq(concreteStandardVault.balanceOf(alice), largeAmount);
+    }
+
+    function test_canUserDeposit_infiniteCap() public {
+        vm.prank(hookOwner);
+        hook.setDepositCap(type(uint256).max);
+
+        bool canDeposit = hook.canUserDeposit(alice, 9999 ether);
+        assertTrue(canDeposit);
     }
 }

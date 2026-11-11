@@ -6,6 +6,7 @@ import {
     IConcreteStandardVaultImpl,
     ConcreteStandardVaultImpl
 } from "../../src/implementation/ConcreteStandardVaultImpl.sol";
+import {IContractId} from "../../src/interface/IContractId.sol";
 
 contract TestBaseSetup is ConcreteFactoryBaseSetup {
     ConcreteStandardVaultImpl public concreteStandardVaultImpl;
@@ -18,8 +19,8 @@ contract TestBaseSetup is ConcreteFactoryBaseSetup {
         vm.startPrank(factoryOwner);
         factory.approveImplementation(address(concreteStandardVaultImpl));
         vm.stopPrank();
-
-        assertEq(factory.getImplementationByVersion(1), address(concreteStandardVaultImpl));
+        uint64 contractId = uint64(IContractId(address(concreteStandardVaultImpl)).ID());
+        assertEq(factory.getImplementationByVaultImpl(contractId), address(concreteStandardVaultImpl));
 
         vm.label(address(factory), "factory");
         vm.label(address(factoryOwner), "factoryOwner");

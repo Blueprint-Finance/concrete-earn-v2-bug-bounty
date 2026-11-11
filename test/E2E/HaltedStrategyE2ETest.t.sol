@@ -4,8 +4,10 @@ pragma solidity ^0.8.24;
 import {ConcreteStandardVaultImplBaseSetup} from "../common/ConcreteStandardVaultImplBaseSetup.t.sol";
 import {IAllocateModule} from "../../src/interface/IAllocateModule.sol";
 import {ERC4626StrategyMock} from "../mock/ERC4626StrategyMock.sol";
+import {ConcreteERC4626Mock} from "../mock/ConcreteERC4626Mock.sol";
 import {IConcreteStandardVaultImpl} from "../../src/interface/IConcreteStandardVaultImpl.sol";
 import {AddStrategyWithDeallocationOrder} from "../common/AddStrategyWithDeallocationOrder.sol";
+import {ConcreteV2RolesLib as RolesLib} from "../../src/lib/Roles.sol";
 
 contract HaltedStrategyE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrategyWithDeallocationOrder {
     address public user1;
@@ -27,9 +29,9 @@ contract HaltedStrategyE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         user2 = makeAddr("user2");
 
         // Deploy strategies
-        activeStrategy = new ERC4626StrategyMock(address(asset));
-        haltedStrategy = new ERC4626StrategyMock(address(asset));
-        strategy3 = new ERC4626StrategyMock(address(asset));
+        activeStrategy = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
+        haltedStrategy = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
+        strategy3 = new ERC4626StrategyMock(address(asset), address(concreteStandardVault));
 
         vm.label(address(activeStrategy), "activeStrategy");
         vm.label(address(haltedStrategy), "haltedStrategy");
@@ -226,6 +228,7 @@ contract HaltedStrategyE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         uint256 lastTotalAssetsBefore = concreteStandardVault.cachedTotalAssets();
 
         // Yield accrual should only process Active strategies
+        vm.prank(allocator);
         concreteStandardVault.accrueYield();
 
         uint256 lastTotalAssetsAfter = concreteStandardVault.cachedTotalAssets();
@@ -251,141 +254,245 @@ contract HaltedStrategyE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         assertEq(actualActiveYieldAccrued, expectedActiveYield); // Should match the expected yield
     }
 
-    function testRemoveHaltedStrategyWithAllocatedFunds() public {
+    function testRemoveHaltedStrategyWithAllocatedFundsReverts() public {
         // Setup: Deposit and allocate to strategy
         _depositAsUser(user1, INITIAL_DEPOSIT);
         _allocateToStrategy(address(haltedStrategy), 400e18);
-
-        // Verify strategy has allocated funds
-        IConcreteStandardVaultImpl.StrategyData memory strategyData =
-            concreteStandardVault.getStrategyData(address(haltedStrategy));
-        assertEq(strategyData.allocated, 400e18);
 
         // Halt the strategy
         vm.prank(strategyOperator);
         concreteStandardVault.toggleStrategyStatus(address(haltedStrategy));
 
-        // Should be able to remove halted strategy even with allocated funds
+        // A Halted strategy that still holds an allocation can no longer be removed directly:
+        // dropping its `allocated` without adjusting cachedTotalAssets would inflate the derived
+        // floating amount (phantom funds). It must be reconciled first.
         vm.prank(strategyOperator);
+        vm.expectRevert(IConcreteStandardVaultImpl.StrategyHasAllocation.selector);
         concreteStandardVault.removeStrategy(address(haltedStrategy));
+    }
 
-        // Verify strategy was removed from the strategies list
+    function testRealizeHaltedStrategyLoss() public {
+        // Setup: Deposit and allocate to strategy
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        uint256 allocationAmount = 400e18;
+        _allocateToStrategy(address(haltedStrategy), allocationAmount);
+
+        uint256 cachedBefore = concreteStandardVault.cachedTotalAssets();
+
+        // Halt the strategy
+        vm.prank(strategyOperator);
+        concreteStandardVault.toggleStrategyStatus(address(haltedStrategy));
+
+        vm.expectEmit(true, false, false, true);
+        emit IConcreteStandardVaultImpl.StrategyLossRealized(address(haltedStrategy), allocationAmount);
+
+        // Realize the frozen position as a loss and remove the strategy
+        vm.prank(strategyOperator);
+        concreteStandardVault.reconcileHaltedStrategy(address(haltedStrategy), address(0));
+
+        // cachedTotalAssets dropped by the realized loss (no phantom floating left behind)
+        assertEq(concreteStandardVault.cachedTotalAssets(), cachedBefore - allocationAmount, "cTA written down by loss");
+
+        // Strategy removed and data cleared
         address[] memory strategies = concreteStandardVault.getStrategies();
         for (uint256 i = 0; i < strategies.length; i++) {
             assertTrue(strategies[i] != address(haltedStrategy));
         }
-
-        // Verify strategy data was deleted
-        strategyData = concreteStandardVault.getStrategyData(address(haltedStrategy));
+        IConcreteStandardVaultImpl.StrategyData memory strategyData =
+            concreteStandardVault.getStrategyData(address(haltedStrategy));
         assertEq(uint256(strategyData.status), uint256(IConcreteStandardVaultImpl.StrategyStatus.Inactive));
         assertEq(strategyData.allocated, 0);
     }
 
-    function testMigrateHaltedStrategyWithAllocatedFunds() public {
+    function testRealizeHaltedStrategyLossRevertsWhenActive() public {
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        _allocateToStrategy(address(activeStrategy), 400e18);
+
+        vm.prank(strategyOperator);
+        vm.expectRevert(IConcreteStandardVaultImpl.StrategyNotHalted.selector);
+        concreteStandardVault.reconcileHaltedStrategy(address(activeStrategy), address(0));
+    }
+
+    function testRealizeHaltedStrategyLossRevertsWhenNoAllocation() public {
+        vm.prank(strategyOperator);
+        concreteStandardVault.toggleStrategyStatus(address(haltedStrategy));
+
+        vm.prank(strategyOperator);
+        vm.expectRevert(IConcreteStandardVaultImpl.StrategyHasNoAllocation.selector);
+        concreteStandardVault.reconcileHaltedStrategy(address(haltedStrategy), address(0));
+    }
+
+    function testMigrateHaltedStrategyPreservesAccounting() public {
         // Setup: Deposit and allocate to the strategy that will become "broken"
         _depositAsUser(user1, INITIAL_DEPOSIT);
         uint256 allocationAmount = 400e18;
         _allocateToStrategy(address(haltedStrategy), allocationAmount);
 
-        // Verify strategy has allocated funds
-        assertEq(concreteStandardVault.getStrategyData(address(haltedStrategy)).allocated, allocationAmount);
-
-        // Record totalAssets before halting (this includes the allocated funds)
-        uint256 totalAssetsBefore = concreteStandardVault.totalAssets();
         uint256 cachedTotalAssetsBefore = concreteStandardVault.cachedTotalAssets();
 
-        // Step 1: Halt the broken strategy
+        // Halt the broken strategy
         vm.prank(strategyOperator);
         concreteStandardVault.toggleStrategyStatus(address(haltedStrategy));
 
-        // Verify strategy is halted
-        assertEq(
-            uint256(concreteStandardVault.getStrategyData(address(haltedStrategy)).status),
-            uint256(IConcreteStandardVaultImpl.StrategyStatus.Halted)
+        // Migrate its allocation onto an Active strategy and remove the broken one.
+        vm.expectEmit(true, true, false, true);
+        emit IConcreteStandardVaultImpl.StrategyAllocationMigrated(
+            address(haltedStrategy), address(activeStrategy), allocationAmount
         );
 
-        // Step 2: Remove the halted broken strategy (totalAssets should remain unchanged)
         vm.prank(strategyOperator);
-        concreteStandardVault.removeStrategy(address(haltedStrategy));
+        concreteStandardVault.reconcileHaltedStrategy(address(haltedStrategy), address(activeStrategy));
 
-        // Verify totalAssets unchanged after removal
-        assertEq(concreteStandardVault.totalAssets(), totalAssetsBefore, "totalAssets unchanged after removal");
+        // The migration itself preserves cachedTotalAssets and the aggregate allocation, so the
+        // stored accounting (and the derived floating amount) is unchanged — no phantom funds.
         assertEq(
             concreteStandardVault.cachedTotalAssets(),
             cachedTotalAssetsBefore,
-            "cachedTotalAssets unchanged after removal"
+            "cachedTotalAssets unchanged after migration"
+        );
+        // totalAssets() previews accrual, so until the position is physically recovered into the
+        // Active destination it surfaces the unbacked allocation as an unrealized loss.
+        assertEq(
+            concreteStandardVault.totalAssets(),
+            cachedTotalAssetsBefore - allocationAmount,
+            "totalAssets previews the unbacked allocation as a loss until recovered"
+        );
+        assertEq(
+            concreteStandardVault.getStrategyData(address(activeStrategy)).allocated,
+            allocationAmount,
+            "allocation migrated to active strategy"
         );
 
-        // Verify strategy was removed from the strategies list
+        // Broken strategy removed from the set.
         address[] memory strategies = concreteStandardVault.getStrategies();
         for (uint256 i = 0; i < strategies.length; i++) {
             assertTrue(strategies[i] != address(haltedStrategy));
         }
+    }
 
-        // Step 3: Rescue and transfer the raw assets back to the vault
-        assertEq(haltedStrategy.totalAllocatedValue(), allocationAmount, "Rescued amount equals original allocation");
+    function testMigratedAllocationRealizesLossOnAccrualWhenNotRecovered() public {
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        uint256 allocationAmount = 400e18;
+        _allocateToStrategy(address(haltedStrategy), allocationAmount);
 
-        // Emergency rescue: withdraw assets from strategy to this contract
-        haltedStrategy.emergencyRescue(address(this));
-
-        // Verify totalAssets unchanged after rescue
-        assertEq(concreteStandardVault.totalAssets(), totalAssetsBefore, "totalAssets unchanged after rescue");
-        assertEq(
-            concreteStandardVault.cachedTotalAssets(),
-            cachedTotalAssetsBefore,
-            "cachedTotalAssets unchanged after rescue"
-        );
-
-        // Verify old strategy has zero allocation after rescue
-        assertEq(haltedStrategy.totalAllocatedValue(), 0, "Old strategy has zero allocated value after rescue");
-
-        // Transfer (donate) the rescued assets to the vault
-        asset.transfer(address(concreteStandardVault), allocationAmount);
-
-        // Verify totalAssets unchanged after donation to vault
-        assertEq(concreteStandardVault.totalAssets(), totalAssetsBefore, "totalAssets unchanged after donation");
-        assertEq(
-            concreteStandardVault.cachedTotalAssets(),
-            cachedTotalAssetsBefore,
-            "cachedTotalAssets unchanged after donation"
-        );
-
-        // Step 4: Add new fixed strategy to the vault
-        ERC4626StrategyMock newFixedStrategy = new ERC4626StrategyMock(address(asset));
-        vm.label(address(newFixedStrategy), "newFixedStrategy");
+        uint256 cachedTotalAssetsBefore = concreteStandardVault.cachedTotalAssets();
 
         vm.prank(strategyOperator);
-        concreteStandardVault.addStrategy(address(newFixedStrategy));
+        concreteStandardVault.toggleStrategyStatus(address(haltedStrategy));
 
-        // Verify new strategy is added and active with zero allocation
-        IConcreteStandardVaultImpl.StrategyData memory strategyData =
-            concreteStandardVault.getStrategyData(address(newFixedStrategy));
-        assertEq(uint256(strategyData.status), uint256(IConcreteStandardVaultImpl.StrategyStatus.Active));
-        assertEq(strategyData.allocated, 0, "New strategy starts with zero allocation");
+        vm.prank(strategyOperator);
+        concreteStandardVault.reconcileHaltedStrategy(address(haltedStrategy), address(activeStrategy));
 
-        // Step 5: Allocate to the new strategy (amount equal to the old removed one)
-        _allocateToStrategy(address(newFixedStrategy), allocationAmount);
+        // Funds were NOT recovered into the destination strategy, so it holds 0 while its
+        // allocated reads `allocationAmount`. The next accrual realizes the shortfall as a loss.
+        vm.prank(allocator);
+        concreteStandardVault.accrueYield();
 
-        // Verify totalAssets unchanged after allocation to new strategy
-        assertEq(concreteStandardVault.totalAssets(), totalAssetsBefore, "totalAssets unchanged after new allocation");
         assertEq(
             concreteStandardVault.cachedTotalAssets(),
-            cachedTotalAssetsBefore,
-            "cachedTotalAssets unchanged after new allocation"
+            cachedTotalAssetsBefore - allocationAmount,
+            "loss realized on accrual when not recovered"
         );
-
-        // Verify new strategy has the same allocation as the old one
         assertEq(
-            concreteStandardVault.getStrategyData(address(newFixedStrategy)).allocated,
+            concreteStandardVault.getStrategyData(address(activeStrategy)).allocated,
+            0,
+            "allocation written down to real value"
+        );
+    }
+
+    function testMigratedAllocationNoLossWhenRecovered() public {
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        uint256 allocationAmount = 400e18;
+        _allocateToStrategy(address(haltedStrategy), allocationAmount);
+
+        uint256 cachedTotalAssetsBefore = concreteStandardVault.cachedTotalAssets();
+
+        vm.prank(strategyOperator);
+        concreteStandardVault.toggleStrategyStatus(address(haltedStrategy));
+
+        vm.prank(strategyOperator);
+        concreteStandardVault.reconcileHaltedStrategy(address(haltedStrategy), address(activeStrategy));
+
+        // Simulate out-of-band recovery: the rescued assets are deposited into the destination
+        // strategy's underlying position so its real value matches the migrated allocation.
+        ConcreteERC4626Mock underlying = activeStrategy.underlyingVault();
+        asset.approve(address(underlying), allocationAmount);
+        underlying.deposit(allocationAmount, address(activeStrategy));
+        assertEq(activeStrategy.totalAllocatedValue(), allocationAmount, "recovered value in place");
+
+        vm.prank(allocator);
+        concreteStandardVault.accrueYield();
+
+        assertEq(concreteStandardVault.cachedTotalAssets(), cachedTotalAssetsBefore, "no loss when fully recovered");
+        assertEq(
+            concreteStandardVault.getStrategyData(address(activeStrategy)).allocated,
             allocationAmount,
-            "New strategy allocation equals old strategy allocation"
+            "allocation intact after recovery"
         );
-        assertEq(
-            newFixedStrategy.totalAllocatedValue(), allocationAmount, "New strategy actual value equals old allocation"
-        );
+    }
 
-        // Final verification: old strategy still has zero allocation
-        assertEq(haltedStrategy.totalAllocatedValue(), 0, "Old strategy still has zero allocated value");
+    function testRealizeHaltedStrategyLossWorksWhilePaused() public {
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        uint256 allocationAmount = 400e18;
+        _allocateToStrategy(address(haltedStrategy), allocationAmount);
+
+        vm.prank(strategyOperator);
+        concreteStandardVault.toggleStrategyStatus(address(haltedStrategy));
+
+        uint256 cachedBefore = concreteStandardVault.cachedTotalAssets();
+
+        // Pause the vault (incident response) and confirm reconciliation still works.
+        _pauseVault();
+
+        vm.prank(strategyOperator);
+        concreteStandardVault.reconcileHaltedStrategy(address(haltedStrategy), address(0));
+
+        assertEq(concreteStandardVault.cachedTotalAssets(), cachedBefore - allocationAmount);
+    }
+
+    function testMigrateHaltedStrategyWorksWhilePaused() public {
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        uint256 allocationAmount = 400e18;
+        _allocateToStrategy(address(haltedStrategy), allocationAmount);
+
+        vm.prank(strategyOperator);
+        concreteStandardVault.toggleStrategyStatus(address(haltedStrategy));
+
+        // Pause the vault (incident response) and confirm migration still works.
+        _pauseVault();
+
+        vm.prank(strategyOperator);
+        concreteStandardVault.reconcileHaltedStrategy(address(haltedStrategy), address(activeStrategy));
+
+        assertEq(
+            concreteStandardVault.getStrategyData(address(activeStrategy)).allocated,
+            allocationAmount,
+            "allocation migrated while paused"
+        );
+    }
+
+    function testMigrateRevertsWhenSourceNotHalted() public {
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        _allocateToStrategy(address(activeStrategy), 400e18);
+
+        vm.prank(strategyOperator);
+        vm.expectRevert(IConcreteStandardVaultImpl.StrategyNotHalted.selector);
+        concreteStandardVault.reconcileHaltedStrategy(address(activeStrategy), address(strategy3));
+    }
+
+    function testMigrateRevertsWhenTargetNotActive() public {
+        _depositAsUser(user1, INITIAL_DEPOSIT);
+        _allocateToStrategy(address(haltedStrategy), 400e18);
+
+        // Halt both the source and the intended target.
+        vm.startPrank(strategyOperator);
+        concreteStandardVault.toggleStrategyStatus(address(haltedStrategy));
+        concreteStandardVault.toggleStrategyStatus(address(strategy3));
+        vm.stopPrank();
+
+        vm.prank(strategyOperator);
+        vm.expectRevert(IConcreteStandardVaultImpl.StrategyIsHalted.selector);
+        concreteStandardVault.reconcileHaltedStrategy(address(haltedStrategy), address(strategy3));
     }
 
     function testCannotRemoveActiveStrategyWithAllocatedFunds() public {
@@ -491,6 +598,14 @@ contract HaltedStrategyE2ETest is ConcreteStandardVaultImplBaseSetup, AddStrateg
         uint256 currentValue = ERC4626StrategyMock(strategy).totalAllocatedValue();
         uint256 allocatedAmount = concreteStandardVault.getStrategyData(strategy).allocated;
         return currentValue > allocatedAmount ? currentValue - allocatedAmount : 0;
+    }
+
+    function _pauseVault() internal {
+        address pauser = makeAddr("pauser");
+        vm.prank(vaultManager);
+        concreteStandardVault.grantRole(RolesLib.PAUSER, pauser);
+        vm.prank(pauser);
+        concreteStandardVault.pause();
     }
 
     function _depositAsUser(address user, uint256 amount) internal {

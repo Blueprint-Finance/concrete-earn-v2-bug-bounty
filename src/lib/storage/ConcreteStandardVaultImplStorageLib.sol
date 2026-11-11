@@ -3,6 +3,7 @@
 pragma solidity ^0.8.24;
 
 import {IConcreteStandardVaultImpl} from "../../interface/IConcreteStandardVaultImpl.sol";
+import {IHurdleRateOracle} from "../../interface/IHurdleRateOracle.sol";
 import {EnumerableSet} from "@openzeppelin-contracts/utils/structs/EnumerableSet.sol";
 import {Hooks} from "../Hooks.sol";
 
@@ -13,14 +14,14 @@ library ConcreteStandardVaultImplStorageLib {
 
     /// @custom:storage-location erc7201:concrete.storage.ConcreteStandardVaultImplStorage
     struct ConcreteStandardVaultImplStorage {
-        /// @dev max deposit amount
-        uint256 maxDepositAmount;
-        /// @dev max withdraw amount
-        uint256 maxWithdrawAmount;
-        /// @dev min deposit amount
-        uint256 minDepositAmount;
-        /// @dev min withdraw amount
-        uint256 minWithdrawAmount;
+        /// @dev max global deposit amount
+        uint256 maxGlobalDepositAmount;
+        /// @dev max tx withdraw amount
+        uint256 maxTxWithdrawAmount;
+        /// @dev min tx deposit amount
+        uint256 minTxDepositAmount;
+        /// @dev min tx withdraw amount
+        uint256 minTxWithdrawAmount;
         /// @dev allocate module's address
         address allocateModule;
         /// 1 slot: 160 + 16 + 32
@@ -45,6 +46,9 @@ library ConcreteStandardVaultImplStorageLib {
         address[] deallocationOrder;
         /// @dev hooks
         Hooks hooks;
+        /// @dev Optional hurdle rate oracle; when set (non-zero), performance fees
+        ///      are only charged on yield exceeding the oracle's reported exchange rate.
+        IHurdleRateOracle hurdleRateOracle;
     }
 
     /**

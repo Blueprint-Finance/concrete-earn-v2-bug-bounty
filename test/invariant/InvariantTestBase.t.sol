@@ -11,6 +11,7 @@ import {ConcreteStandardVaultImpl} from "../../src/implementation/ConcreteStanda
 import {AllocateModule} from "../../src/module/AllocateModule.sol";
 import {ActorUtil} from "./helpers/ActorUtil.sol";
 import {ConcreteV2RolesLib as RolesLib} from "../../src/lib/Roles.sol";
+import {IContractId} from "../../src/interface/IContractId.sol";
 
 /**
  * @title InvariantTestBase
@@ -48,7 +49,8 @@ abstract contract InvariantTestBase is Test, TestBaseSetup {
 
         bytes memory vaultData = abi.encode(address(allocateModule), address(asset), vaultManager, "Test Vault", "TV");
 
-        address vaultAddress = factory.create(1, vaultManager, vaultData);
+        uint64 vaultImpl = uint64(IContractId(address(concreteStandardVaultImpl)).ID());
+        address vaultAddress = factory.create(vaultImpl, vaultManager, vaultData);
         vault = ConcreteStandardVaultImpl(vaultAddress);
         vm.label(address(vault), "vault");
 
